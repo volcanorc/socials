@@ -237,7 +237,7 @@ function showLoadingState(message = '') {
 
 function showAccessDeniedState(message) {
   state.viewMode = 'denied';
-  state.accessDeniedMessage = message || 'Access denied.';
+  state.accessDeniedMessage = 'Welcome';
   state.matrix = [];
   state.lastSavedMatrix = [];
   state.selectedCell = null;
@@ -251,7 +251,7 @@ function showAccessDeniedState(message) {
   renderConnectionCard();
   renderHeaderMeta();
   renderDetailPanel();
-  setNotice(state.accessDeniedMessage, 'error');
+  setNotice('Welcome');
 }
 
 function showLoadErrorState(message) {
@@ -589,8 +589,7 @@ function renderDetailPanel() {
 
   if (state.viewMode === 'denied') {
     elements.detailStatus.innerHTML = `
-      <div><strong>Access denied:</strong> ${escapeHtml(state.accessDeniedMessage || 'Access denied.')}</div>
-      <div><strong>Status:</strong> This Google account is not on the allowed list.</div>
+      <div><strong>Welcome</strong></div>
     `;
     return;
   }
@@ -1006,7 +1005,7 @@ async function handleGoogleCredentialResponse(response) {
 
   try {
     await loadSpreadsheetIntoGrid('Loading spreadsheet...');
-    setNotice('Signed in. Spreadsheet loaded.');
+    setNotice('Signed in');
   } catch (error) {
     const message = error.message || 'Unable to load spreadsheet.';
     if (String(message).toLowerCase().includes('access denied')) {
