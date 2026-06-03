@@ -27,6 +27,8 @@ powershell -ExecutionPolicy Bypass -File run-server.ps1
 
 If you prefer, you can also run `node server.js` from the repo root after the `.env` file is in place.
 
+For the simplest Windows workflow, double-click `start-local.cmd`.
+
 ## Google OAuth notes
 
 - Create a Google OAuth client for a web application.
