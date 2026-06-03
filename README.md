@@ -14,7 +14,7 @@ Local-first dashboard for a private Google Spreadsheet. The app authenticates wi
 ## Setup
 
 1. Copy `.env.example` to `.env`
-2. Fill in your Google OAuth values:
+2. Fill in your Google OAuth values in `.env`:
    - `GOOGLE_CLIENT_ID`
    - `GOOGLE_CLIENT_SECRET`
    - `GOOGLE_REDIRECT_URI`
@@ -32,6 +32,7 @@ node server.js
 - For popup mode, `GOOGLE_REDIRECT_URI` should be the app origin, for example `http://localhost:3000`.
 - The app requests `openid`, `email`, `profile`, and Google Sheets access.
 - The spreadsheet itself must remain private in Google Drive.
+- The server automatically reads local `.env` values at startup.
 
 ## Security model
 
