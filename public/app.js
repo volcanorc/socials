@@ -1,6 +1,5 @@
 const state = {
   session: null,
-  configured: true,
   spreadsheetTitle: '',
   sheets: [],
   sheetName: '',
@@ -11,9 +10,13 @@ const state = {
   filterValue: '',
   selectedRow: null,
   mode: 'view',
-  authConfig: null,
+  authConfig: {
+    clientId: '200733782466-fimsnk62ainlnrholpjgbmc9s20jghuh.apps.googleusercontent.com',
+    scope: 'openid email profile https://www.googleapis.com/auth/spreadsheets',
+  },
   authClient: null,
   authReady: false,
+  pendingAuthRequest: null,
 };
 
 const elements = {};
@@ -31,29 +34,163 @@ function escapeHtml(value) {
     .replaceAll("'", '&#39;');
 }
 
-async function request(path, options = {}) {
-  const response = await fetch(path, {
-    credentials: 'include',
+const GOOGLE_SHEETS_BASE = 'https://sheets.googleapis.com/v4/spreadsheets';
+const GOOGLE_USERINFO_URL = 'https://openidconnect.googleapis.com/v1/userinfo';
+
+function createApiError(message, status = 500, payload = null) {
+  const error = new Error(message);
+  error.status = status;
+  error.payload = payload;
+  return error;
+}
+
+async function readJson(response) {
+  const text = await response.text();
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { raw: text };
+  }
+}
+
+async function browserApiFetch(url, accessToken, options = {}) {
+  const response = await fetch(url, {
     ...options,
     headers: {
+      authorization: `Bearer ${accessToken}`,
       ...(options.body ? { 'content-type': 'application/json' } : {}),
       ...(options.headers || {}),
     },
   });
 
-  const contentType = response.headers.get('content-type') || '';
-  const payload = contentType.includes('application/json')
-    ? await response.json()
-    : await response.text();
-
+  const payload = await readJson(response);
   if (!response.ok) {
-    const error = new Error(payload?.error || payload || `Request failed (${response.status})`);
-    error.status = response.status;
-    error.payload = payload;
-    throw error;
+    throw createApiError(
+      payload?.error?.message || payload?.error_description || payload?.error || `Request failed (${response.status})`,
+      response.status,
+      payload,
+    );
+  }
+  return payload;
+}
+
+async function fetchGoogleUserInfo(accessToken) {
+  return browserApiFetch(GOOGLE_USERINFO_URL, accessToken);
+}
+
+async function fetchSpreadsheetMetadata(accessToken) {
+  return browserApiFetch(
+    `${GOOGLE_SHEETS_BASE}/${encodeURIComponent(SPREADSHEET_ID)}?fields=spreadsheetId,properties.title,sheets.properties`,
+    accessToken,
+  );
+}
+
+async function fetchSheetValues(sheetName, accessToken) {
+  const range = encodeURIComponent(sheetName);
+  const payload = await browserApiFetch(
+    `${GOOGLE_SHEETS_BASE}/${encodeURIComponent(SPREADSHEET_ID)}/values/${range}?majorDimension=ROWS`,
+    accessToken,
+  );
+  return payload.values || [];
+}
+
+async function appendSheetRow({ sheetName, accessToken, values }) {
+  const range = encodeURIComponent(sheetName);
+  return browserApiFetch(
+    `${GOOGLE_SHEETS_BASE}/${encodeURIComponent(SPREADSHEET_ID)}/values/${range}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
+    accessToken,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        majorDimension: 'ROWS',
+        values: [values],
+      }),
+    },
+  );
+}
+
+async function updateSheetRow({ sheetName, accessToken, rowNumber, values, columnCount }) {
+  const endColumn = columnNumberToName(columnCount);
+  const range = encodeURIComponent(`${sheetName}!A${rowNumber}:${endColumn}${rowNumber}`);
+  return browserApiFetch(
+    `${GOOGLE_SHEETS_BASE}/${encodeURIComponent(SPREADSHEET_ID)}/values/${range}?valueInputOption=USER_ENTERED`,
+    accessToken,
+    {
+      method: 'PUT',
+      body: JSON.stringify({
+        majorDimension: 'ROWS',
+        values: [values],
+      }),
+    },
+  );
+}
+
+async function deleteSheetRow({ sheetId, accessToken, rowNumber }) {
+  return browserApiFetch(
+    `${GOOGLE_SHEETS_BASE}/${encodeURIComponent(SPREADSHEET_ID)}:batchUpdate`,
+    accessToken,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        requests: [{
+          deleteDimension: {
+            range: {
+              sheetId,
+              dimension: 'ROWS',
+              startIndex: rowNumber - 1,
+              endIndex: rowNumber,
+            },
+          },
+        }],
+      }),
+    },
+  );
+}
+
+function columnNumberToName(number) {
+  let n = Math.max(1, Number(number) || 1);
+  let result = '';
+  while (n > 0) {
+    const remainder = (n - 1) % 26;
+    result = String.fromCharCode(65 + remainder) + result;
+    n = Math.floor((n - 1) / 26);
+  }
+  return result;
+}
+
+function parseSheetTable(values) {
+  const rawRows = Array.isArray(values) ? values : [];
+  const headerRowIndex = rawRows.findIndex((row) => Array.isArray(row) && row.some((cell) => String(cell ?? '').trim() !== ''));
+  if (headerRowIndex === -1) {
+    return { headers: [], rows: [], headerRowNumber: 1 };
   }
 
-  return payload;
+  const headers = rawRows[headerRowIndex].map((cell, index) => {
+    const label = String(cell ?? '').trim();
+    return label || `Column ${index + 1}`;
+  });
+
+  const rows = rawRows.slice(headerRowIndex + 1).map((row, index) => {
+    const normalized = {};
+    headers.forEach((header, headerIndex) => {
+      normalized[header] = row?.[headerIndex] ?? '';
+    });
+    return {
+      id: `${headerRowIndex + 2 + index}`,
+      rowNumber: headerRowIndex + 2 + index,
+      values: normalized,
+    };
+  }).filter((entry) => Object.values(entry.values).some((value) => String(value ?? '').trim() !== ''));
+
+  return { headers, rows, headerRowNumber: headerRowIndex + 1 };
+}
+
+function buildRowValues(headers, rowValues) {
+  return headers.map((header) => {
+    const value = rowValues[header];
+    return value == null ? '' : value;
+  });
 }
 
 function setNotice(message, kind = 'info') {
@@ -92,9 +229,7 @@ function setSignInState({ loading = false, enabled = false, label = 'Continue wi
       ? 'Preparing Google sign-in...'
       : enabled
         ? 'Ready to sign in'
-        : state.authConfig
-          ? 'Google sign-in unavailable'
-          : 'Google OAuth not configured';
+        : 'Google sign-in unavailable';
   }
 }
 
@@ -384,23 +519,25 @@ async function saveRow() {
   setLoading(true);
   try {
     if (state.mode === 'create') {
-      const result = await request(`/api/sheet?sheet=${encodeURIComponent(state.sheetName)}`, {
-        method: 'POST',
-        body: JSON.stringify({ values }),
+      await appendSheetRow({
+        sheetName: state.sheetName,
+        accessToken: state.session?.accessToken,
+        values: buildRowValues(state.sheetData.headers, values),
       });
-      state.sheetData = result;
     } else if (state.selectedRow) {
-      const result = await request(`/api/sheet?sheet=${encodeURIComponent(state.sheetName)}&rowNumber=${encodeURIComponent(state.selectedRow.rowNumber)}`, {
-        method: 'PUT',
-        body: JSON.stringify({ values }),
+      await updateSheetRow({
+        sheetName: state.sheetName,
+        accessToken: state.session?.accessToken,
+        rowNumber: state.selectedRow.rowNumber,
+        values: buildRowValues(state.sheetData.headers, values),
+        columnCount: Math.max(state.sheetData.headers.length, 1),
       });
-      state.sheetData = result;
     }
 
     state.mode = 'view';
     state.selectedRow = null;
-    await refreshSheetLists(true);
-    await selectSheet(state.sheetName, false);
+    await loadSheet(state.sheetName);
+    await refreshSheetLists();
     setNotice('Changes were synced back to Google Sheets.');
   } catch (error) {
     setNotice(error.message, 'error');
@@ -413,14 +550,15 @@ async function deleteRow(row = state.selectedRow) {
   if (!row) return;
   setLoading(true);
   try {
-    const result = await request(`/api/sheet?sheet=${encodeURIComponent(state.sheetName)}&rowNumber=${encodeURIComponent(row.rowNumber)}`, {
-      method: 'DELETE',
+    await deleteSheetRow({
+      sheetId: state.sheetData?.sheetId,
+      accessToken: state.session?.accessToken,
+      rowNumber: row.rowNumber,
     });
-    state.sheetData = result;
     state.selectedRow = null;
     state.mode = 'view';
-    await refreshSheetLists(true);
-    await selectSheet(state.sheetName, false);
+    await loadSheet(state.sheetName);
+    await refreshSheetLists();
     setNotice('Row deleted and synced back to Google Sheets.');
   } catch (error) {
     setNotice(error.message, 'error');
@@ -453,9 +591,14 @@ async function selectSheet(sheetName, triggerLoad = true) {
 async function loadSheet(sheetName) {
   setLoading(true);
   try {
-    const data = await request(`/api/sheet?sheet=${encodeURIComponent(sheetName)}`);
-    state.sheetData = data;
-    state.spreadsheetTitle = data.spreadsheetTitle || state.spreadsheetTitle;
+    const values = await fetchSheetValues(sheetName, state.session?.accessToken);
+    const data = parseSheetTable(values);
+    state.sheetData = {
+      ...data,
+      sheetName,
+      spreadsheetTitle: state.spreadsheetTitle || 'Private spreadsheet',
+      sheetId: state.sheets.find((sheet) => sheet.title === sheetName)?.sheetId ?? null,
+    };
     populateFilterControls();
     renderSheetMeta();
     renderTable();
@@ -477,10 +620,12 @@ async function loadSheet(sheetName) {
 }
 
 async function refreshSheetLists(autoLoad = false) {
-  const data = await request('/api/spreadsheet');
-  state.configured = data.configured !== false;
-  state.spreadsheetTitle = data.spreadsheetTitle || state.spreadsheetTitle;
-  state.sheets = data.sheets || [];
+  const metadata = await fetchSpreadsheetMetadata(state.session?.accessToken);
+  state.spreadsheetTitle = metadata.properties?.title || state.spreadsheetTitle;
+  state.sheets = (metadata.sheets || []).map((sheet) => ({
+    title: sheet.properties?.title || 'Untitled',
+    sheetId: sheet.properties?.sheetId ?? null,
+  }));
   renderSessionBox();
   renderSheetTabs();
   renderSheetMeta();
@@ -490,12 +635,6 @@ async function refreshSheetLists(autoLoad = false) {
   if (autoLoad && state.sheetName) {
     await loadSheet(state.sheetName);
   }
-}
-
-async function loadAuthConfig() {
-  const config = await request('/api/auth/config');
-  state.authConfig = config;
-  return config;
 }
 
 async function waitForGoogleIdentityLibrary() {
@@ -512,43 +651,55 @@ async function waitForGoogleIdentityLibrary() {
   });
 }
 
-function initGoogleCodeClient() {
+function initGoogleTokenClient() {
   if (!state.authConfig || !window.google?.accounts?.oauth2) return;
 
-  state.authClient = window.google.accounts.oauth2.initCodeClient({
+  state.authClient = window.google.accounts.oauth2.initTokenClient({
     client_id: state.authConfig.clientId,
     scope: state.authConfig.scope,
-    ux_mode: 'popup',
-    state: state.authConfig.state,
     include_granted_scopes: true,
-    select_account: true,
-    callback: handleGoogleCodeResponse,
-    error_callback: handleGooglePopupError,
+    callback: handleGoogleTokenResponse,
   });
   state.authReady = true;
   setSignInState({ enabled: true, label: 'Continue with Google' });
 }
 
+function requestGoogleAccessToken() {
+  if (!state.authReady || !state.authClient) {
+    setNotice('Google sign-in is still preparing. Please try again in a moment.', 'error');
+    return;
+  }
+
+  return new Promise((resolve, reject) => {
+    state.pendingAuthRequest = { resolve, reject };
+    try {
+      state.authClient.requestAccessToken();
+    } catch (error) {
+      state.pendingAuthRequest = null;
+      reject(error);
+    }
+  });
+}
+
 async function prepareSignIn() {
   setSignInState({ loading: true, enabled: false });
   try {
-    await loadAuthConfig();
     await waitForGoogleIdentityLibrary();
-    initGoogleCodeClient();
+    initGoogleTokenClient();
   } catch (error) {
     state.authReady = false;
     setSignInState({ loading: false, enabled: false, label: 'Google sign-in unavailable' });
-    if (elements.oauthState) {
-      elements.oauthState.textContent = 'Google OAuth not configured';
-    }
-    if (error.message && error.message !== 'Google OAuth is not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI.') {
-      setNotice(error.message, 'error');
-    }
+    setNotice(error.message || 'Google sign-in is unavailable.', 'error');
   }
 }
 
-async function handleGoogleCodeResponse(response) {
+async function handleGoogleTokenResponse(response) {
   if (response.error) {
+    if (state.pendingAuthRequest?.reject) {
+      state.pendingAuthRequest.reject(response);
+    }
+    state.pendingAuthRequest = null;
+
     if (isGoogleVerificationBlock(response)) {
       setNotice(getGoogleVerificationHelpMessage(), 'error');
       if (elements.oauthState) {
@@ -560,34 +711,46 @@ async function handleGoogleCodeResponse(response) {
     return;
   }
 
+  const accessToken = response.access_token;
+  if (!accessToken) {
+    if (state.pendingAuthRequest?.reject) {
+      state.pendingAuthRequest.reject(new Error('Google sign-in did not return an access token.'));
+    }
+    state.pendingAuthRequest = null;
+    setNotice('Google sign-in did not return an access token.', 'error');
+    return;
+  }
+
   setLoading(true);
-  setSignInState({ loading: true, enabled: false });
+  setSignInState({ loading: true, enabled: false, label: 'Signing in...' });
 
   try {
-    const result = await request('/auth/callback', {
-      method: 'POST',
-      headers: {
-        'X-Requested-With': 'XMLHttpRequest',
-      },
-      body: JSON.stringify({
-        code: response.code,
-        state: response.state || state.authConfig?.state || '',
-      }),
-    });
-
+    const profilePayload = await fetchGoogleUserInfo(accessToken);
     state.session = {
       authenticated: true,
-      profile: result.profile,
+      accessToken,
+      expiresAt: Date.now() + (Number(response.expires_in || 3600) * 1000),
+      profile: {
+        id: profilePayload.sub,
+        email: profilePayload.email,
+        name: profilePayload.name || profilePayload.email,
+        picture: profilePayload.picture || '',
+      },
     };
+
+    if (state.pendingAuthRequest?.resolve) {
+      state.pendingAuthRequest.resolve(response);
+    }
+    state.pendingAuthRequest = null;
 
     setNotice('Signed in. Loading your private spreadsheet...');
     await bootstrapSignedInView();
   } catch (error) {
-    const isDenied = error.status === 403 || error.payload?.error === 'permission_denied';
-    setNotice(isDenied
-      ? 'This Google account does not have access to the private spreadsheet.'
-      : error.message, 'error');
-    await prepareSignIn();
+    if (state.pendingAuthRequest?.reject) {
+      state.pendingAuthRequest.reject(error);
+    }
+    state.pendingAuthRequest = null;
+    setNotice(error.message || 'Google sign-in failed.', 'error');
   } finally {
     setLoading(false);
   }
@@ -613,13 +776,20 @@ function handleGooglePopupError(error) {
   setNotice('Google sign-in could not start.', 'error');
 }
 
-async function bootstrapSignedInView() {
-  const session = await request('/api/session');
-  state.session = session;
-  renderSessionBox();
+function showSignedInShell() {
   elements.authPanel.classList.add('hidden');
   elements.dashboard.classList.remove('hidden');
+  renderSessionBox();
+}
 
+function showSignedOutShell() {
+  elements.dashboard.classList.add('hidden');
+  elements.authPanel.classList.remove('hidden');
+  renderSessionBox();
+}
+
+async function bootstrapSignedInView() {
+  showSignedInShell();
   await refreshSheetLists();
   if (state.sheets.length) {
     await selectSheet(state.sheets[0].title);
@@ -627,10 +797,13 @@ async function bootstrapSignedInView() {
 }
 
 async function bootstrapSignedOutView() {
-  state.session = { authenticated: false };
-  renderSessionBox();
-  elements.dashboard.classList.add('hidden');
-  elements.authPanel.classList.remove('hidden');
+  state.session = null;
+  state.sheetData = null;
+  state.sheets = [];
+  state.sheetName = '';
+  state.selectedRow = null;
+  state.mode = 'view';
+  showSignedOutShell();
   setSignInState({ loading: false, enabled: false, label: 'Continue with Google' });
   await prepareSignIn();
 }
@@ -640,19 +813,28 @@ async function requestSignIn() {
     setNotice('Google sign-in is still preparing. Please try again in a moment.', 'error');
     return;
   }
-  state.authClient.requestCode();
+  await requestGoogleAccessToken();
 }
 
 async function logoutUser() {
-  await fetch('/auth/logout', { method: 'POST', credentials: 'include' });
-  state.authClient = null;
-  state.authConfig = null;
-  state.authReady = false;
+  if (state.session?.accessToken && window.google?.accounts?.oauth2?.revoke) {
+    try {
+      await new Promise((resolve) => {
+        window.google.accounts.oauth2.revoke(state.session.accessToken, () => resolve());
+      });
+    } catch {
+      // Logout should still succeed if revoke fails.
+    }
+  }
+  state.session = null;
   state.sheetData = null;
   state.sheets = [];
   state.sheetName = '';
   state.selectedRow = null;
   state.mode = 'view';
+  state.search = '';
+  state.filterField = '';
+  state.filterValue = '';
   await bootstrapSignedOutView();
   setNotice('You have been logged out.');
 }
@@ -720,10 +902,7 @@ async function bootstrap() {
   });
 
   setSignInState({ loading: true, enabled: false, label: 'Preparing Google sign-in...' });
-
-  const session = await request('/api/session');
-  state.session = session;
-  renderSessionBox();
+  showSignedOutShell();
 
   const params = new URLSearchParams(window.location.search);
   if (params.get('error') === 'permission-denied') {
@@ -734,18 +913,7 @@ async function bootstrap() {
     setNotice(getGoogleVerificationHelpMessage(), 'error');
   }
 
-  if (!session.authenticated) {
-    elements.dashboard.classList.add('hidden');
-    elements.authPanel.classList.remove('hidden');
-    if (!session.configured) {
-      setSignInState({ loading: false, enabled: false, label: 'Google OAuth not configured' });
-      return;
-    }
-    await prepareSignIn();
-    return;
-  }
-
-  await bootstrapSignedInView();
+  await prepareSignIn();
 }
 
 bootstrap().catch((error) => setNotice(error.message, 'error'));
