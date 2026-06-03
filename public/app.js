@@ -57,7 +57,7 @@ function normalizeMatrix(payload) {
     : Array.isArray(payload?.values)
       ? payload.values
       : Array.isArray(payload)
-    ? payload
+        ? payload
       : null;
 
   if (!raw) {
@@ -71,6 +71,13 @@ function normalizeMatrix(payload) {
     while (normalized.length < maxColumns) normalized.push('');
     return normalized;
   });
+}
+
+function extractMatrixData(payload) {
+  if (Array.isArray(payload?.data)) return payload.data;
+  if (Array.isArray(payload?.values)) return payload.values;
+  if (Array.isArray(payload)) return payload;
+  return null;
 }
 
 function keyFor(row, col) {
@@ -388,7 +395,11 @@ async function readSpreadsheetResponse(response) {
 async function loadMatrixFromSource() {
   const payload = await requestSpreadsheet('GET');
   state.activeSheetName = String(payload?.currentSheet || state.activeSheetName || '');
-  return normalizeMatrix(payload?.data || payload?.values || payload);
+  const matrixData = extractMatrixData(payload);
+  if (!matrixData) {
+    throw createApiError('Apps Script response must include a JSON data matrix.', 500, payload);
+  }
+  return normalizeMatrix(matrixData);
 }
 
 async function saveCellToSource(row, col, val) {
