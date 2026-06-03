@@ -1,32 +1,34 @@
 const APP_CONFIG = window.APP_CONFIG || {};
+const APPS_SCRIPT_URL = APP_CONFIG.appsScriptUrl || '';
 const GOOGLE_CLIENT_ID = APP_CONFIG.googleClientId || '';
-const SPREADSHEET_ID = APP_CONFIG.spreadsheetId || '';
 const AUTH_SCOPE = APP_CONFIG.authScope || 'openid email profile https://www.googleapis.com/auth/spreadsheets';
-const AUTH_STORAGE_KEY = 'secure-google-dashboard.auth.v1';
+const FORWARD_AUTH_TOKEN = Boolean(APP_CONFIG.forwardAuthToken);
+
+const AUTH_STORAGE_KEY = 'native-grid.auth.v1';
 const SESSION_EXPIRY_SKEW_MS = 60_000;
+const SAVE_DEBOUNCE_MS = 600;
 
 const state = {
   session: null,
-  spreadsheetTitle: '',
-  sheets: [],
-  sheetName: '',
-  sheetData: null,
-  loading: false,
-  search: '',
-  filterField: '',
-  filterValue: '',
-  selectedRow: null,
-  mode: 'view',
-  accessState: 'signed-out',
-  accessMessage: '',
   authClient: null,
   authReady: false,
   pendingAuthRequest: null,
+  matrix: [],
+  lastSavedMatrix: [],
+  loading: false,
+  selectedCell: null,
+  searchQuery: '',
+  notice: '',
+  noticeKind: 'info',
+  saveTimers: new Map(),
+  dirtyCells: new Set(),
+  savingCells: new Set(),
+  cellErrors: new Map(),
+  lastLoadedAt: null,
 };
 
-let sessionExpiryTimer = null;
-
 const elements = {};
+let sessionExpiryTimer = null;
 
 function $(id) {
   return document.getElementById(id);
@@ -41,6 +43,51 @@ function escapeHtml(value) {
     .replaceAll("'", '&#39;');
 }
 
+function cloneMatrix(matrix) {
+  return (Array.isArray(matrix) ? matrix : []).map((row) => (
+    Array.isArray(row) ? row.map((cell) => String(cell ?? '')) : ['']
+  ));
+}
+
+function normalizeMatrix(payload) {
+  const raw = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.values)
+      ? payload.values
+      : null;
+
+  if (!raw) {
+    throw Object.assign(new Error('Apps Script response must be a JSON matrix.'), { status: 500 });
+  }
+
+  const rows = raw.map((row) => (Array.isArray(row) ? row.map((cell) => String(cell ?? '')) : ['']));
+  const maxColumns = Math.max(1, ...rows.map((row) => row.length));
+  return rows.map((row) => {
+    const normalized = row.slice(0, maxColumns);
+    while (normalized.length < maxColumns) normalized.push('');
+    return normalized;
+  });
+}
+
+function keyFor(row, col) {
+  return `${row}:${col}`;
+}
+
+function columnLabel(index) {
+  let n = index;
+  let result = '';
+  while (n > 0) {
+    const remainder = (n - 1) % 26;
+    result = String.fromCharCode(65 + remainder) + result;
+    n = Math.floor((n - 1) / 26);
+  }
+  return result;
+}
+
+function isSessionExpired(session) {
+  return !session?.accessToken || !Number.isFinite(Number(session?.expiresAt)) || Date.now() >= Number(session.expiresAt) - SESSION_EXPIRY_SKEW_MS;
+}
+
 function readStoredSession() {
   try {
     const raw = window.localStorage.getItem(AUTH_STORAGE_KEY);
@@ -48,12 +95,7 @@ function readStoredSession() {
 
     const parsed = JSON.parse(raw);
     const expiresAt = Number(parsed?.expiresAt);
-    if (!parsed?.accessToken || !Number.isFinite(expiresAt)) {
-      window.localStorage.removeItem(AUTH_STORAGE_KEY);
-      return null;
-    }
-
-    if (Date.now() >= expiresAt - SESSION_EXPIRY_SKEW_MS) {
+    if (!parsed?.accessToken || !Number.isFinite(expiresAt) || Date.now() >= expiresAt - SESSION_EXPIRY_SKEW_MS) {
       window.localStorage.removeItem(AUTH_STORAGE_KEY);
       return null;
     }
@@ -73,7 +115,7 @@ function readStoredSession() {
     try {
       window.localStorage.removeItem(AUTH_STORAGE_KEY);
     } catch {
-      // Ignore storage cleanup errors.
+      // Ignore storage cleanup failures.
     }
     return null;
   }
@@ -87,7 +129,7 @@ function persistSession(session) {
       profile: session.profile,
     }));
   } catch {
-    // Ignore storage quota or privacy-mode failures.
+    // Ignore storage quota / privacy mode failures.
   }
 }
 
@@ -95,49 +137,43 @@ function clearStoredSession() {
   try {
     window.localStorage.removeItem(AUTH_STORAGE_KEY);
   } catch {
-    // Ignore storage cleanup errors.
+    // Ignore cleanup failures.
   }
 }
 
-function isSessionExpired(session) {
-  return !session?.accessToken || !Number.isFinite(Number(session?.expiresAt)) || Date.now() >= Number(session.expiresAt) - SESSION_EXPIRY_SKEW_MS;
+function clearSessionExpiryTimer() {
+  if (sessionExpiryTimer) {
+    clearTimeout(sessionExpiryTimer);
+    sessionExpiryTimer = null;
+  }
 }
 
-function resetWorkspaceState() {
-  state.spreadsheetTitle = '';
-  state.sheets = [];
-  state.sheetName = '';
-  state.sheetData = null;
-  state.search = '';
-  state.filterField = '';
-  state.filterValue = '';
-  state.selectedRow = null;
-  state.mode = 'view';
+function scheduleSessionExpiryTimer() {
+  clearSessionExpiryTimer();
+  if (!state.session?.expiresAt) return;
+
+  const delay = Math.max(0, Number(state.session.expiresAt) - Date.now() - SESSION_EXPIRY_SKEW_MS);
+  sessionExpiryTimer = setTimeout(() => {
+    if (isSessionExpired(state.session)) {
+      void handleExpiredSession('Your Google sign-in expired. Please sign in again.');
+      return;
+    }
+    scheduleSessionExpiryTimer();
+  }, delay);
 }
 
-function renderWorkspaceState() {
+function clearRuntimeSession(message = '') {
+  clearSessionExpiryTimer();
+  state.session = null;
+  state.authClient = null;
+  state.authReady = false;
+  state.pendingAuthRequest = null;
+  clearStoredSession();
+  if (message) {
+    setNotice(message, 'error');
+  }
   renderSessionBox();
-  renderSheetTabs();
-  renderSheetMeta();
-  renderTable();
-  renderDetailForm();
-  syncActionButtons();
 }
-
-function setNoAccessState(message) {
-  state.accessState = 'no-access';
-  state.accessMessage = message;
-  resetWorkspaceState();
-  renderWorkspaceState();
-}
-
-function setAuthorizedState() {
-  state.accessState = 'authorized';
-  state.accessMessage = '';
-}
-
-const GOOGLE_SHEETS_BASE = 'https://sheets.googleapis.com/v4/spreadsheets';
-const GOOGLE_USERINFO_URL = 'https://openidconnect.googleapis.com/v1/userinfo';
 
 function createApiError(message, status = 500, payload = null) {
   const error = new Error(message);
@@ -156,20 +192,33 @@ async function readJson(response) {
   }
 }
 
-async function browserApiFetch(url, accessToken, options = {}) {
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      authorization: `Bearer ${accessToken}`,
-      ...(options.body ? { 'content-type': 'application/json' } : {}),
-      ...(options.headers || {}),
-    },
+function buildRequestHeaders(extraHeaders = {}) {
+  const headers = { ...(extraHeaders || {}) };
+
+  if (FORWARD_AUTH_TOKEN && state.session?.accessToken) {
+    headers.authorization = `Bearer ${state.session.accessToken}`;
+  }
+
+  return headers;
+}
+
+async function requestSpreadsheet(method, body = null) {
+  if (!APPS_SCRIPT_URL) {
+    throw createApiError('Apps Script URL is missing from window.APP_CONFIG.', 500);
+  }
+
+  const response = await fetch(APPS_SCRIPT_URL, {
+    method,
+    mode: 'cors',
+    cache: 'no-store',
+    headers: buildRequestHeaders(body ? { 'content-type': 'application/json' } : {}),
+    body: body ? JSON.stringify(body) : undefined,
   });
 
   const payload = await readJson(response);
   if (!response.ok) {
     throw createApiError(
-      payload?.error?.message || payload?.error_description || payload?.error || `Request failed (${response.status})`,
+      payload?.message || payload?.error || payload?.status || `Request failed (${response.status})`,
       response.status,
       payload,
     );
@@ -177,254 +226,89 @@ async function browserApiFetch(url, accessToken, options = {}) {
   return payload;
 }
 
-async function fetchGoogleUserInfo(accessToken) {
-  return browserApiFetch(GOOGLE_USERINFO_URL, accessToken);
+async function loadMatrixFromSource() {
+  const payload = await requestSpreadsheet('GET');
+  return normalizeMatrix(payload);
 }
 
-async function fetchSpreadsheetMetadata(accessToken) {
-  return browserApiFetch(
-    `${GOOGLE_SHEETS_BASE}/${encodeURIComponent(SPREADSHEET_ID)}?fields=spreadsheetId,properties.title,sheets.properties`,
-    accessToken,
-  );
-}
-
-async function fetchSheetValues(sheetName, accessToken) {
-  const range = encodeURIComponent(sheetName);
-  const payload = await browserApiFetch(
-    `${GOOGLE_SHEETS_BASE}/${encodeURIComponent(SPREADSHEET_ID)}/values/${range}?majorDimension=ROWS`,
-    accessToken,
-  );
-  return payload.values || [];
-}
-
-async function appendSheetRow({ sheetName, accessToken, values }) {
-  const range = encodeURIComponent(sheetName);
-  return browserApiFetch(
-    `${GOOGLE_SHEETS_BASE}/${encodeURIComponent(SPREADSHEET_ID)}/values/${range}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
-    accessToken,
-    {
-      method: 'POST',
-      body: JSON.stringify({
-        majorDimension: 'ROWS',
-        values: [values],
-      }),
-    },
-  );
-}
-
-async function updateSheetRow({ sheetName, accessToken, rowNumber, values, columnCount }) {
-  const endColumn = columnNumberToName(columnCount);
-  const range = encodeURIComponent(`${sheetName}!A${rowNumber}:${endColumn}${rowNumber}`);
-  return browserApiFetch(
-    `${GOOGLE_SHEETS_BASE}/${encodeURIComponent(SPREADSHEET_ID)}/values/${range}?valueInputOption=USER_ENTERED`,
-    accessToken,
-    {
-      method: 'PUT',
-      body: JSON.stringify({
-        majorDimension: 'ROWS',
-        values: [values],
-      }),
-    },
-  );
-}
-
-async function deleteSheetRow({ sheetId, accessToken, rowNumber }) {
-  return browserApiFetch(
-    `${GOOGLE_SHEETS_BASE}/${encodeURIComponent(SPREADSHEET_ID)}:batchUpdate`,
-    accessToken,
-    {
-      method: 'POST',
-      body: JSON.stringify({
-        requests: [{
-          deleteDimension: {
-            range: {
-              sheetId,
-              dimension: 'ROWS',
-              startIndex: rowNumber - 1,
-              endIndex: rowNumber,
-            },
-          },
-        }],
-      }),
-    },
-  );
-}
-
-function columnNumberToName(number) {
-  let n = Math.max(1, Number(number) || 1);
-  let result = '';
-  while (n > 0) {
-    const remainder = (n - 1) % 26;
-    result = String.fromCharCode(65 + remainder) + result;
-    n = Math.floor((n - 1) / 26);
-  }
-  return result;
-}
-
-function parseSheetTable(values) {
-  const rawRows = Array.isArray(values) ? values : [];
-  const headerRowIndex = rawRows.findIndex((row) => Array.isArray(row) && row.some((cell) => String(cell ?? '').trim() !== ''));
-  if (headerRowIndex === -1) {
-    return { headers: [], rows: [], headerRowNumber: 1 };
-  }
-
-  const headers = rawRows[headerRowIndex].map((cell, index) => {
-    const label = String(cell ?? '').trim();
-    return label || `Column ${index + 1}`;
-  });
-
-  const rows = rawRows.slice(headerRowIndex + 1).map((row, index) => {
-    const normalized = {};
-    headers.forEach((header, headerIndex) => {
-      normalized[header] = row?.[headerIndex] ?? '';
-    });
-    return {
-      id: `${headerRowIndex + 2 + index}`,
-      rowNumber: headerRowIndex + 2 + index,
-      values: normalized,
-    };
-  }).filter((entry) => Object.values(entry.values).some((value) => String(value ?? '').trim() !== ''));
-
-  return { headers, rows, headerRowNumber: headerRowIndex + 1 };
-}
-
-function buildRowValues(headers, rowValues) {
-  return headers.map((header) => {
-    const value = rowValues[header];
-    return value == null ? '' : value;
-  });
+async function saveCellToSource(row, col, val) {
+  return requestSpreadsheet('POST', { row, col, val });
 }
 
 function setNotice(message, kind = 'info') {
+  state.notice = message || '';
+  state.noticeKind = kind;
   const notice = elements.notice;
+  if (!notice) return;
+
   if (!message) {
     notice.classList.add('hidden');
-    notice.textContent = '';
     notice.classList.remove('error');
+    notice.textContent = '';
     return;
   }
-  notice.textContent = message;
+
   notice.classList.remove('hidden');
   notice.classList.toggle('error', kind === 'error');
+  notice.textContent = message;
 }
 
-function setLoading(isLoading) {
+function setLoading(isLoading, label = '') {
   state.loading = isLoading;
-  elements.refreshButton.disabled = isLoading || !state.session;
-  elements.newButton.disabled = isLoading || state.accessState !== 'authorized' || !state.sheetData?.headers?.length;
-  syncActionButtons();
+  if (elements.refreshButton) elements.refreshButton.disabled = isLoading;
+  if (elements.newButton) elements.newButton.disabled = isLoading;
+  if (elements.saveButton) elements.saveButton.disabled = isLoading;
+  if (elements.deleteButton) elements.deleteButton.disabled = isLoading;
+  if (elements.cancelButton) elements.cancelButton.disabled = isLoading;
+  if (elements.sheetTitle && label) elements.sheetTitle.textContent = label;
+  renderConnectionCard();
 }
 
-function syncActionButtons() {
-  const hasEditableSheet = state.accessState === 'authorized' && Boolean(state.sheetData?.headers?.length);
-  const canSave = state.mode === 'create' ? hasEditableSheet : Boolean(state.selectedRow) && hasEditableSheet;
-  elements.saveButton.disabled = state.loading || !canSave;
-  elements.deleteButton.disabled = state.loading || !hasEditableSheet || !state.selectedRow || state.mode === 'create';
-  elements.cancelButton.disabled = state.loading || (!state.selectedRow && state.mode !== 'create');
-}
-
-function setSignInState({ loading = false, enabled = false, label = 'Continue with Google' } = {}) {
-  elements.signInButton.disabled = !enabled || loading;
-  const labelNode = elements.signInLabel;
-  if (labelNode) labelNode.textContent = loading ? 'Preparing Google sign-in...' : label;
-  if (elements.oauthState) {
-    elements.oauthState.textContent = loading
-      ? 'Preparing Google sign-in...'
-      : enabled
-        ? 'Ready to sign in'
-        : 'Google sign-in unavailable';
+function clearSaveTimers() {
+  for (const timer of state.saveTimers.values()) {
+    clearTimeout(timer);
   }
+  state.saveTimers.clear();
 }
 
-function isGoogleVerificationBlock(response) {
-  const text = [response?.error, response?.error_description, response?.message]
-    .filter(Boolean)
-    .join(' ')
-    .toLowerCase();
-  return text.includes('access_denied')
-    || text.includes('verification process')
-    || text.includes('developer-approved testers')
-    || text.includes('app is currently being tested')
-    || text.includes('test users');
+function resetCellState() {
+  state.dirtyCells.clear();
+  state.savingCells.clear();
+  state.cellErrors.clear();
 }
 
-function getGoogleVerificationHelpMessage() {
-  return 'Google blocked this sign-in because the OAuth app is still in Testing or this Google account is not listed as a Test user. In Google Cloud Console, open APIs & Services > OAuth consent screen > Test users, add this account, then try again. If you want everyone to sign in, publish the app and submit it for verification.';
+function resetAppStateAfterLoad(matrix) {
+  state.matrix = cloneMatrix(matrix);
+  state.lastSavedMatrix = cloneMatrix(matrix);
+  state.lastLoadedAt = new Date();
+  state.searchQuery = elements.searchInput?.value || '';
+  resetCellState();
+  clearSaveTimers();
 }
 
-function clearSessionExpiryTimer() {
-  if (sessionExpiryTimer) {
-    clearTimeout(sessionExpiryTimer);
-    sessionExpiryTimer = null;
-  }
+function getMaxColumns() {
+  return Math.max(1, ...state.matrix.map((row) => row.length));
 }
 
-function scheduleSessionExpiryTimer() {
-  clearSessionExpiryTimer();
-  if (!state.session?.expiresAt) return;
-
-  const delay = Math.max(0, Number(state.session.expiresAt) - Date.now() - SESSION_EXPIRY_SKEW_MS);
-  sessionExpiryTimer = setTimeout(() => {
-    if (isSessionExpired(state.session)) {
-      void handleExpiredSession('Your Google sign-in expired. Please sign in again.');
-    } else {
-      scheduleSessionExpiryTimer();
-    }
-  }, delay);
-}
-
-function getLiveSession() {
-  if (!state.session) return null;
-  if (isSessionExpired(state.session)) return null;
-  return state.session;
-}
-
-async function handleExpiredSession(message = 'Your Google sign-in expired. Please sign in again.') {
-  clearSessionExpiryTimer();
-  await bootstrapSignedOutView(message);
-  await prepareSignIn();
-}
-
-async function bootstrapSignedOutView(message = '') {
-  clearSessionExpiryTimer();
-  state.session = null;
-  state.accessState = 'signed-out';
-  state.accessMessage = '';
-  state.authReady = false;
-  state.authClient = null;
-  state.pendingAuthRequest = null;
-  clearStoredSession();
-  resetWorkspaceState();
-  showSignedOutShell();
-  renderWorkspaceState();
-  setSignInState({ loading: true, enabled: false, label: 'Preparing Google sign-in...' });
-  if (message) {
-    setNotice(message, 'error');
-  } else {
-    setNotice('');
-  }
-}
-
-async function bootstrapSignedInView({ autoLoad = true } = {}) {
-  showSignedInShell();
-  if (!autoLoad) {
-    renderWorkspaceState();
-    setNotice('Session restored. Click Refresh to load the spreadsheet.', 'info');
-    return;
-  }
-
-  const authorized = await refreshSheetLists();
-  if (authorized && state.sheets.length && state.accessState === 'authorized') {
-    await selectSheet(state.sheets[0].title);
-  }
+function getVisibleRows() {
+  const query = state.searchQuery.trim().toLowerCase();
+  return state.matrix
+    .map((row, rowIndex) => ({ row, rowIndex }))
+    .filter(({ row }) => !query || row.some((cell) => String(cell ?? '').toLowerCase().includes(query)));
 }
 
 function renderSessionBox() {
   const box = elements.sessionBox;
+  if (!box) return;
   box.innerHTML = '';
 
   if (!state.session?.authenticated) {
-    box.innerHTML = '<div class="profile"><strong>Not signed in</strong><span>Google login required</span></div>';
+    box.innerHTML = `
+      <div class="profile">
+        <strong>Not signed in</strong>
+        <span>Browser session is available for future restricted mode</span>
+      </div>
+    `;
     return;
   }
 
@@ -448,467 +332,334 @@ function renderSessionBox() {
   box.append(avatar, profile, logout);
 }
 
-function renderSheetTabs() {
-  const container = elements.sheetTabs;
-  container.innerHTML = '';
-
-  if (state.accessState === 'no-access') {
-    const message = document.createElement('div');
-    message.className = 'panel-meta';
-    message.textContent = 'This signed-in account cannot open the restricted spreadsheet.';
-    container.appendChild(message);
-    return;
-  }
-
-  state.sheets.forEach((sheet) => {
-    const button = document.createElement('button');
-    button.className = `sheet-tab ${sheet.title === state.sheetName ? 'active' : ''}`;
-    button.innerHTML = `<span>${escapeHtml(sheet.title)}</span><span>${sheet.sheetId ?? ''}</span>`;
-    button.addEventListener('click', () => selectSheet(sheet.title));
-    container.appendChild(button);
-  });
+function renderConnectionCard() {
+  if (!elements.sheetTabs) return;
+  const lines = [];
+  lines.push(`<div class="panel-meta"><strong>Source:</strong> Apps Script web app</div>`);
+  lines.push(`<div class="panel-meta"><strong>Endpoint:</strong> ${escapeHtml(APPS_SCRIPT_URL || 'missing')}</div>`);
+  lines.push(`<div class="panel-meta"><strong>Status:</strong> ${state.loading ? 'Loading...' : state.lastLoadedAt ? `Loaded ${state.lastLoadedAt.toLocaleTimeString()}` : 'Ready'}</div>`);
+  elements.sheetTabs.innerHTML = lines.join('');
 }
 
-function renderSheetMeta() {
-  if (!state.session?.authenticated) {
-    elements.spreadsheetTitle.textContent = 'Private spreadsheet';
-    elements.sheetMeta.textContent = 'Choose a worksheet to view rows.';
-    elements.sheetTitle.textContent = 'Select a worksheet';
-    elements.sheetSummary.textContent = 'The dashboard is waiting for a worksheet selection.';
-    return;
+function renderHeaderMeta() {
+  if (elements.spreadsheetTitle) {
+    elements.spreadsheetTitle.textContent = 'Live spreadsheet';
   }
-
-  if (state.accessState === 'no-access') {
-    elements.spreadsheetTitle.textContent = state.spreadsheetTitle || 'Restricted spreadsheet';
-    elements.sheetMeta.textContent = 'Signed in, but this account does not have spreadsheet access.';
-    elements.sheetTitle.textContent = 'No access to this spreadsheet';
-    elements.sheetSummary.textContent = state.accessMessage || 'Google denied permission for this account.';
-    return;
+  if (elements.sheetMeta) {
+    elements.sheetMeta.textContent = state.matrix.length
+      ? `${state.matrix.length} row${state.matrix.length === 1 ? '' : 's'} · ${getMaxColumns()} column${getMaxColumns() === 1 ? '' : 's'}`
+      : 'No rows loaded yet.';
   }
-
-  elements.spreadsheetTitle.textContent = state.spreadsheetTitle || 'Private spreadsheet';
-  elements.sheetMeta.textContent = state.sheetName
-    ? `${state.sheets.length} worksheet${state.sheets.length === 1 ? '' : 's'} available`
-    : 'Choose a worksheet to view rows.';
-  elements.sheetTitle.textContent = state.sheetName || 'Select a worksheet';
-  elements.sheetSummary.textContent = state.sheetName
-    ? 'This data loads only after Google confirms the signed-in account can access the private spreadsheet.'
-    : 'The dashboard is waiting for a worksheet selection.';
+  if (elements.sheetTitle) {
+    elements.sheetTitle.textContent = 'Native spreadsheet grid';
+  }
+  if (elements.sheetSummary) {
+    elements.sheetSummary.textContent = APPS_SCRIPT_URL
+      ? 'Cells autosave back to your Apps Script web app as you type.'
+      : 'Set the Apps Script URL in the page config to load data.';
+  }
 }
 
-function getVisibleRows() {
-  const rows = state.sheetData?.rows || [];
-  const query = state.search.trim().toLowerCase();
-  return rows.filter((row) => {
-    const values = Object.values(row.values || {}).map((value) => String(value ?? '').toLowerCase());
-    const matchesSearch = !query || values.some((value) => value.includes(query));
-    const matchesFilter = !state.filterField || !state.filterValue || String(row.values?.[state.filterField] ?? '') === state.filterValue;
-    return matchesSearch && matchesFilter;
-  });
-}
-
-function populateFilterControls() {
-  const headers = state.sheetData?.headers || [];
-  elements.filterField.innerHTML = '';
-  elements.filterValue.innerHTML = '';
-
-  const allOption = document.createElement('option');
-  allOption.value = '';
-  allOption.textContent = 'All fields';
-  elements.filterField.appendChild(allOption);
-
-  headers.forEach((header) => {
-    const option = document.createElement('option');
-    option.value = header;
-    option.textContent = header;
-    elements.filterField.appendChild(option);
-  });
-
-  const valueAll = document.createElement('option');
-  valueAll.value = '';
-  valueAll.textContent = 'All values';
-  elements.filterValue.appendChild(valueAll);
-
-  if (state.filterField) {
-    const unique = new Set();
-    for (const row of state.sheetData?.rows || []) {
-      const value = String(row.values?.[state.filterField] ?? '');
-      if (value.trim()) unique.add(value);
-    }
-    [...unique].sort().forEach((value) => {
-      const option = document.createElement('option');
-      option.value = value;
-      option.textContent = value;
-      elements.filterValue.appendChild(option);
-    });
+function renderDetailPanel() {
+  if (!elements.detailStatus) return;
+  if (state.selectedCell) {
+    const { row, col } = state.selectedCell;
+    const value = state.matrix[row - 1]?.[col - 1] ?? '';
+    const saved = state.lastSavedMatrix[row - 1]?.[col - 1] ?? '';
+    const error = state.cellErrors.get(keyFor(row, col));
+    elements.detailStatus.innerHTML = `
+      <div><strong>Selected cell:</strong> ${row}, ${columnLabel(col)}</div>
+      <div><strong>Current value:</strong> ${escapeHtml(value || '(empty)')}</div>
+      <div><strong>Saved value:</strong> ${escapeHtml(saved || '(empty)')}</div>
+      <div><strong>Status:</strong> ${error ? escapeHtml(error) : 'Editing is live and autosaved.'}</div>
+    `;
+  } else {
+    elements.detailStatus.innerHTML = `
+      <div><strong>Editing mode:</strong> Autosave is on.</div>
+      <div><strong>Tip:</strong> Click any cell, type, and the change will save after you pause.</div>
+    `;
   }
-
-  elements.filterField.value = state.filterField;
-  elements.filterValue.value = state.filterValue;
 }
 
-function renderTable() {
-  const headers = state.sheetData?.headers || [];
-  const rows = getVisibleRows();
-  elements.rowCount.textContent = `${rows.length} row${rows.length === 1 ? '' : 's'}`;
+function isDirtyCell(row, col) {
+  return state.dirtyCells.has(keyFor(row, col));
+}
 
-  const thead = elements.dataTable.querySelector('thead');
-  const tbody = elements.dataTable.querySelector('tbody');
+function isSavingCell(row, col) {
+  return state.savingCells.has(keyFor(row, col));
+}
+
+function getCellError(row, col) {
+  return state.cellErrors.get(keyFor(row, col));
+}
+
+function updateCellClasses(input, row, col) {
+  const key = keyFor(row, col);
+  input.classList.toggle('cell-dirty', state.dirtyCells.has(key));
+  input.classList.toggle('cell-saving', state.savingCells.has(key));
+  input.classList.toggle('cell-error', state.cellErrors.has(key));
+}
+
+function renderGrid() {
+  const table = elements.dataTable;
+  if (!table) return;
+
+  const thead = table.querySelector('thead');
+  const tbody = table.querySelector('tbody');
   thead.innerHTML = '';
   tbody.innerHTML = '';
 
-  if (state.accessState === 'no-access') {
-    thead.innerHTML = '<tr><th>Status</th></tr>';
-    tbody.innerHTML = `<tr><td>${escapeHtml(state.accessMessage || 'This signed-in account cannot open the restricted spreadsheet.')}</td></tr>`;
-    return;
-  }
-
-  if (!headers.length) {
-    thead.innerHTML = '<tr><th>No columns</th></tr>';
-    tbody.innerHTML = '<tr><td>The selected worksheet does not appear to have a header row yet.</td></tr>';
-    return;
-  }
-
+  const maxColumns = getMaxColumns();
   const headerRow = document.createElement('tr');
-  const rowNumberHead = document.createElement('th');
-  rowNumberHead.textContent = '#';
-  headerRow.appendChild(rowNumberHead);
 
-  headers.forEach((header) => {
+  const corner = document.createElement('th');
+  corner.textContent = '#';
+  headerRow.appendChild(corner);
+
+  for (let col = 1; col <= maxColumns; col += 1) {
     const th = document.createElement('th');
-    th.textContent = header;
+    th.textContent = columnLabel(col);
     headerRow.appendChild(th);
-  });
-
-  const actionsHead = document.createElement('th');
-  actionsHead.textContent = 'Actions';
-  headerRow.appendChild(actionsHead);
+  }
   thead.appendChild(headerRow);
 
-  rows.forEach((row) => {
+  const rows = getVisibleRows();
+  elements.rowCount.textContent = `${rows.length} row${rows.length === 1 ? '' : 's'} visible`;
+
+  rows.forEach(({ row, rowIndex }) => {
     const tr = document.createElement('tr');
-    if (state.selectedRow?.rowNumber === row.rowNumber) tr.style.background = 'rgba(109, 211, 255, 0.1)';
-    tr.addEventListener('click', () => selectRow(row));
 
-    const numberCell = document.createElement('td');
-    numberCell.textContent = row.rowNumber;
-    tr.appendChild(numberCell);
+    const rowHead = document.createElement('th');
+    rowHead.className = 'row-index';
+    rowHead.textContent = String(rowIndex + 1);
+    tr.appendChild(rowHead);
 
-    headers.forEach((header) => {
+    for (let col = 1; col <= maxColumns; col += 1) {
+      const value = row[col - 1] ?? '';
       const td = document.createElement('td');
-      td.innerHTML = escapeHtml(row.values?.[header] ?? '');
+      td.dataset.row = String(rowIndex + 1);
+      td.dataset.col = String(col);
+
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.spellcheck = false;
+      input.autocomplete = 'off';
+      input.value = value;
+      input.dataset.row = String(rowIndex + 1);
+      input.dataset.col = String(col);
+      input.className = 'sheet-cell-input';
+      input.addEventListener('focus', () => {
+        state.selectedCell = { row: rowIndex + 1, col };
+        renderDetailPanel();
+      });
+      input.addEventListener('input', handleCellInput);
+      input.addEventListener('change', handleCellChange);
+      input.addEventListener('keydown', handleCellKeydown);
+
+      updateCellClasses(input, rowIndex + 1, col);
+      td.appendChild(input);
       tr.appendChild(td);
-    });
+    }
 
-    const actions = document.createElement('td');
-    const group = document.createElement('div');
-    group.className = 'row-actions';
-
-    const view = document.createElement('button');
-    view.type = 'button';
-    view.className = 'secondary-button inline-button';
-    view.textContent = 'View';
-    view.addEventListener('click', (event) => {
-      event.stopPropagation();
-      selectRow(row);
-    });
-
-    const edit = document.createElement('button');
-    edit.type = 'button';
-    edit.className = 'primary-button inline-button';
-    edit.textContent = 'Edit';
-    edit.addEventListener('click', (event) => {
-      event.stopPropagation();
-      editRow(row);
-    });
-
-    const del = document.createElement('button');
-    del.type = 'button';
-    del.className = 'danger-button inline-button';
-    del.textContent = 'Delete';
-    del.addEventListener('click', async (event) => {
-      event.stopPropagation();
-      if (confirm(`Delete row ${row.rowNumber} from ${state.sheetName}?`)) {
-        await deleteRow(row);
-      }
-    });
-
-    group.append(view, edit, del);
-    actions.appendChild(group);
-    tr.appendChild(actions);
     tbody.appendChild(tr);
   });
+
+  renderHeaderMeta();
+  renderDetailPanel();
 }
 
-function renderDetailForm() {
-  const form = elements.detailForm;
-  const headers = state.sheetData?.headers || [];
-  form.innerHTML = '';
-
-  if (state.accessState === 'no-access') {
-    elements.detailStatus.textContent = state.accessMessage || 'This signed-in account cannot open the restricted spreadsheet.';
-    syncActionButtons();
-    return;
-  }
-
-  if (!state.sheetName) {
-    elements.detailStatus.textContent = 'Select a worksheet first.';
-    syncActionButtons();
-    return;
-  }
-
-  if (!headers.length) {
-    elements.detailStatus.textContent = 'This worksheet has no headers yet.';
-    syncActionButtons();
-    return;
-  }
-
-  const record = state.mode === 'create'
-    ? Object.fromEntries(headers.map((header) => [header, '']))
-    : state.selectedRow?.values || Object.fromEntries(headers.map((header) => [header, '']));
-
-  headers.forEach((header) => {
-    const field = document.createElement('div');
-    field.className = 'field';
-    const label = document.createElement('label');
-    label.textContent = header;
-    label.setAttribute('for', `field-${header}`);
-    const input = document.createElement('textarea');
-    input.rows = 2;
-    input.id = `field-${header}`;
-    input.dataset.header = header;
-    input.value = record[header] ?? '';
-    field.append(label, input);
-    form.appendChild(field);
-  });
-
-  elements.detailStatus.textContent = state.mode === 'create'
-    ? 'Create a new row. Values will be written back to the active worksheet.'
-    : state.selectedRow
-      ? `Row ${state.selectedRow.rowNumber} from ${state.sheetName}`
-      : 'Select a row to inspect it.';
-  syncActionButtons();
-}
-
-function collectFormValues() {
-  const values = {};
-  elements.detailForm.querySelectorAll('[data-header]').forEach((input) => {
-    values[input.dataset.header] = input.value;
-  });
-  return values;
-}
-
-function selectRow(row) {
-  state.selectedRow = row;
-  state.mode = 'view';
-  renderTable();
-  renderDetailForm();
-}
-
-function editRow(row) {
-  state.selectedRow = row;
-  state.mode = 'edit';
-  renderTable();
-  renderDetailForm();
-}
-
-function beginCreateRow() {
-  state.selectedRow = null;
-  state.mode = 'create';
-  renderTable();
-  renderDetailForm();
-}
-
-async function saveRow() {
-  if (!state.sheetName || !state.sheetData?.headers?.length) return;
-  const session = getLiveSession();
-  if (!session) {
-    if (state.session) {
-      await handleExpiredSession();
-    }
-    return;
-  }
-  const values = collectFormValues();
-  setLoading(true);
-  try {
-    if (state.mode === 'create') {
-      await appendSheetRow({
-        sheetName: state.sheetName,
-        accessToken: session.accessToken,
-        values: buildRowValues(state.sheetData.headers, values),
-      });
-    } else if (state.selectedRow) {
-      await updateSheetRow({
-        sheetName: state.sheetName,
-        accessToken: session.accessToken,
-        rowNumber: state.selectedRow.rowNumber,
-        values: buildRowValues(state.sheetData.headers, values),
-        columnCount: Math.max(state.sheetData.headers.length, 1),
-      });
-    }
-
-    state.mode = 'view';
-    state.selectedRow = null;
-    const reloaded = await loadSheet(state.sheetName);
-    if (!reloaded) return;
-    const refreshed = await refreshSheetLists();
-    if (!refreshed) return;
-    setNotice('Changes were synced back to Google Sheets.');
-  } catch (error) {
-    if (error.status === 401) {
-      await handleExpiredSession('Your Google sign-in expired. Please sign in again.');
-      return;
-    }
-    if (error.status === 403) {
-      setNotice('This signed-in account can read the spreadsheet, but it cannot edit rows.', 'error');
-      return;
-    }
-    setNotice(error.message, 'error');
-  } finally {
-    setLoading(false);
-  }
-}
-
-async function deleteRow(row = state.selectedRow) {
-  if (!row) return;
-  const session = getLiveSession();
-  if (!session) {
-    if (state.session) {
-      await handleExpiredSession();
-    }
-    return;
-  }
-  setLoading(true);
-  try {
-    await deleteSheetRow({
-      sheetId: state.sheetData?.sheetId,
-      accessToken: session.accessToken,
-      rowNumber: row.rowNumber,
-    });
-    state.selectedRow = null;
-    state.mode = 'view';
-    const reloaded = await loadSheet(state.sheetName);
-    if (!reloaded) return;
-    const refreshed = await refreshSheetLists();
-    if (!refreshed) return;
-    setNotice('Row deleted and synced back to Google Sheets.');
-  } catch (error) {
-    if (error.status === 401) {
-      await handleExpiredSession('Your Google sign-in expired. Please sign in again.');
-      return;
-    }
-    if (error.status === 403) {
-      setNotice('This signed-in account can read the spreadsheet, but it cannot delete rows.', 'error');
-      return;
-    }
-    setNotice(error.message, 'error');
-  } finally {
-    setLoading(false);
-  }
-}
-
-async function selectSheet(sheetName, triggerLoad = true) {
-  state.sheetName = sheetName;
-  state.search = '';
-  state.filterField = '';
-  state.filterValue = '';
-  state.selectedRow = null;
-  state.mode = 'view';
-  elements.searchInput.value = '';
-  elements.filterField.value = '';
-  elements.filterValue.value = '';
-  renderSheetTabs();
-  renderSheetMeta();
-  renderDetailForm();
-  populateFilterControls();
-  if (triggerLoad) {
-    await loadSheet(sheetName);
+function setCellError(row, col, message) {
+  const key = keyFor(row, col);
+  if (message) {
+    state.cellErrors.set(key, message);
   } else {
-    renderTable();
+    state.cellErrors.delete(key);
   }
 }
 
-async function loadSheet(sheetName) {
-  setLoading(true);
-  try {
-    const session = getLiveSession();
-    if (!session) {
-      if (state.session) {
-        await handleExpiredSession();
-      }
-      return false;
-    }
+function setCellDirty(row, col, isDirty) {
+  const key = keyFor(row, col);
+  if (isDirty) {
+    state.dirtyCells.add(key);
+  } else {
+    state.dirtyCells.delete(key);
+  }
+}
 
-    const values = await fetchSheetValues(sheetName, session.accessToken);
-    const data = parseSheetTable(values);
-    setAuthorizedState();
-    state.sheetData = {
-      ...data,
-      sheetName,
-      spreadsheetTitle: state.spreadsheetTitle || 'Private spreadsheet',
-      sheetId: state.sheets.find((sheet) => sheet.title === sheetName)?.sheetId ?? null,
-    };
-    populateFilterControls();
-    renderSheetMeta();
-    renderTable();
-    renderDetailForm();
-    return true;
+function updateInMemoryCell(row, col, value) {
+  while (state.matrix.length < row) state.matrix.push(Array.from({ length: getMaxColumns() }, () => ''));
+  const targetRow = state.matrix[row - 1];
+  while (targetRow.length < col) targetRow.push('');
+  targetRow[col - 1] = value;
+}
+
+function getInputFromEvent(event) {
+  const input = event.currentTarget;
+  const row = Number(input.dataset.row);
+  const col = Number(input.dataset.col);
+  return { input, row, col };
+}
+
+function scheduleSave(row, col, input, immediate = false) {
+  const key = keyFor(row, col);
+  const existingTimer = state.saveTimers.get(key);
+  if (existingTimer) clearTimeout(existingTimer);
+
+  if (immediate) {
+    void commitCellSave(row, col, input);
+    return;
+  }
+
+  state.saveTimers.set(key, setTimeout(() => {
+    state.saveTimers.delete(key);
+    void commitCellSave(row, col, input);
+  }, SAVE_DEBOUNCE_MS));
+}
+
+async function commitCellSave(row, col, input) {
+  const key = keyFor(row, col);
+  const value = input.value;
+  setCellDirty(row, col, false);
+  setCellError(row, col, '');
+  state.savingCells.add(key);
+  updateCellClasses(input, row, col);
+  renderDetailPanel();
+
+  try {
+    await saveCellToSource(row, col, value);
+    state.lastSavedMatrix[row - 1] = state.lastSavedMatrix[row - 1] || [];
+    state.lastSavedMatrix[row - 1][col - 1] = value;
+    input.classList.remove('cell-error');
+    setNotice(`Saved ${columnLabel(col)}${row}.`);
   } catch (error) {
-    if (error.status === 401) {
-      await handleExpiredSession('Your Google sign-in expired. Please sign in again.');
-      return false;
+    setCellDirty(row, col, true);
+    setCellError(row, col, error.message || 'Save failed');
+    input.classList.add('cell-error');
+    setNotice(`Unable to save ${columnLabel(col)}${row}: ${error.message || 'unknown error'}`, 'error');
+  } finally {
+    state.savingCells.delete(key);
+    updateCellClasses(input, row, col);
+    renderDetailPanel();
+  }
+}
+
+function handleCellInput(event) {
+  const { input, row, col } = getInputFromEvent(event);
+  updateInMemoryCell(row, col, input.value);
+  setCellDirty(row, col, input.value !== (state.lastSavedMatrix[row - 1]?.[col - 1] ?? ''));
+  setCellError(row, col, '');
+  updateCellClasses(input, row, col);
+  renderDetailPanel();
+  scheduleSave(row, col, input, false);
+}
+
+function handleCellChange(event) {
+  const { input, row, col } = getInputFromEvent(event);
+  scheduleSave(row, col, input, true);
+}
+
+function handleCellKeydown(event) {
+  if (event.key !== 'Enter') return;
+  event.preventDefault();
+  const { input, row, col } = getInputFromEvent(event);
+  scheduleSave(row, col, input, true);
+  input.blur();
+}
+
+function hasPendingChanges() {
+  return state.dirtyCells.size > 0 || state.saveTimers.size > 0 || state.savingCells.size > 0;
+}
+
+async function flushPendingSaves() {
+  const pendingKeys = [...state.saveTimers.keys()];
+  for (const key of pendingKeys) {
+    const timer = state.saveTimers.get(key);
+    if (timer) clearTimeout(timer);
+    state.saveTimers.delete(key);
+  }
+
+  const inputs = [...document.querySelectorAll('.sheet-cell-input')];
+  const saves = [];
+
+  for (const input of inputs) {
+    const row = Number(input.dataset.row);
+    const col = Number(input.dataset.col);
+    const key = keyFor(row, col);
+    if (state.dirtyCells.has(key) || state.cellErrors.has(key)) {
+      saves.push(commitCellSave(row, col, input));
     }
-    if (error.status === 403) {
-      const message = 'This signed-in Google account does not have permission to open the restricted spreadsheet.';
-      setNoAccessState(message);
-      setNotice(message, 'error');
-      return false;
-    }
-    setNotice(error.message, 'error');
-    return false;
+  }
+
+  await Promise.all(saves);
+}
+
+async function reloadMatrix() {
+  if (hasPendingChanges() && !window.confirm('Reloading will discard pending local edits that have not saved yet. Continue?')) {
+    return;
+  }
+
+  setLoading(true, 'Reloading spreadsheet...');
+  try {
+    const matrix = await loadMatrixFromSource();
+    resetAppStateAfterLoad(matrix);
+    setNotice('Spreadsheet loaded.');
+    renderGrid();
+    renderConnectionCard();
+    renderHeaderMeta();
+  } catch (error) {
+    setNotice(error.message || 'Unable to load spreadsheet.', 'error');
   } finally {
     setLoading(false);
   }
 }
 
-async function refreshSheetLists(autoLoad = false) {
-  const session = getLiveSession();
-  if (!session) {
-    if (state.session) {
-      await handleExpiredSession('Your Google sign-in expired. Please sign in again.');
-    }
-    return false;
+function addBlankRow() {
+  const width = getMaxColumns();
+  const blankRow = Array.from({ length: width }, () => '');
+  state.matrix.push(blankRow);
+  state.lastSavedMatrix.push(Array.from({ length: width }, () => ''));
+  renderGrid();
+  renderHeaderMeta();
+
+  window.requestAnimationFrame(() => {
+    const input = document.querySelector(`.sheet-cell-input[data-row="${state.matrix.length}"][data-col="1"]`);
+    if (input) input.focus();
+  });
+
+  setNotice(`Added blank row ${state.matrix.length}. Type to autosave it.`);
+}
+
+function clearAllErrors() {
+  state.cellErrors.clear();
+
+  for (const input of document.querySelectorAll('.sheet-cell-input')) {
+    const row = Number(input.dataset.row);
+    const col = Number(input.dataset.col);
+    updateCellClasses(input, row, col);
   }
 
+  renderDetailPanel();
+  setNotice('Cleared cell error highlights.');
+}
+
+async function loadMatrixOnBoot() {
+  setLoading(true, 'Loading spreadsheet...');
   try {
-    const metadata = await fetchSpreadsheetMetadata(session.accessToken);
-    state.spreadsheetTitle = metadata.properties?.title || state.spreadsheetTitle;
-    state.sheets = (metadata.sheets || []).map((sheet) => ({
-      title: sheet.properties?.title || 'Untitled',
-      sheetId: sheet.properties?.sheetId ?? null,
-    }));
-    setAuthorizedState();
-    renderWorkspaceState();
-    if (!state.sheetName && state.sheets.length) {
-      state.sheetName = state.sheets[0].title;
-    }
-    if (autoLoad && state.sheetName) {
-      return await loadSheet(state.sheetName);
-    }
-    return true;
+    const matrix = await loadMatrixFromSource();
+    resetAppStateAfterLoad(matrix);
+    renderGrid();
+    renderConnectionCard();
+    renderHeaderMeta();
+    setNotice('Spreadsheet loaded.');
   } catch (error) {
-    if (error.status === 401) {
-      await handleExpiredSession('Your Google sign-in expired. Please sign in again.');
-      return false;
-    }
-    if (error.status === 403) {
-      const message = 'This signed-in Google account does not have permission to open the restricted spreadsheet.';
-      setNoAccessState(message);
-      setNotice(message, 'error');
-      return false;
-    }
-    setNotice(error.message, 'error');
-    return false;
+    state.matrix = [[]];
+    state.lastSavedMatrix = [[]];
+    renderGrid();
+    renderConnectionCard();
+    renderHeaderMeta();
+    setNotice(error.message || 'Unable to load spreadsheet.', 'error');
+  } finally {
+    setLoading(false);
   }
 }
 
@@ -916,10 +667,10 @@ async function waitForGoogleIdentityLibrary() {
   if (window.google?.accounts?.oauth2) return;
 
   await new Promise((resolve, reject) => {
-    const start = Date.now();
+    const started = Date.now();
     const tick = () => {
       if (window.google?.accounts?.oauth2) return resolve();
-      if (Date.now() - start > 10000) return reject(new Error('Google sign-in library did not load.'));
+      if (Date.now() - started > 10000) return reject(new Error('Google sign-in library did not load.'));
       setTimeout(tick, 50);
     };
     tick();
@@ -939,30 +690,25 @@ function initGoogleTokenClient() {
   setSignInState({ enabled: true, label: 'Continue with Google' });
 }
 
-function requestGoogleAccessToken() {
-  if (!state.authReady || !state.authClient) {
-    setNotice('Google sign-in is still preparing. Please try again in a moment.', 'error');
-    return;
+function setSignInState({ loading = false, enabled = false, label = 'Continue with Google' } = {}) {
+  if (elements.signInButton) elements.signInButton.disabled = !enabled || loading;
+  if (elements.signInLabel) elements.signInLabel.textContent = loading ? 'Preparing Google sign-in...' : label;
+  if (elements.oauthState) {
+    elements.oauthState.textContent = loading
+      ? 'Preparing Google sign-in...'
+      : enabled
+        ? 'Ready to sign in'
+        : 'Google sign-in unavailable';
   }
-
-  return new Promise((resolve, reject) => {
-    state.pendingAuthRequest = { resolve, reject };
-    try {
-      state.authClient.requestAccessToken();
-    } catch (error) {
-      state.pendingAuthRequest = null;
-      reject(error);
-    }
-  });
 }
 
 async function prepareSignIn() {
   setSignInState({ loading: true, enabled: false });
   try {
-    if (!GOOGLE_CLIENT_ID || !SPREADSHEET_ID) {
+    if (!GOOGLE_CLIENT_ID) {
       state.authReady = false;
       setSignInState({ loading: false, enabled: false, label: 'Google sign-in unavailable' });
-      setNotice('App config is missing the Google client ID or spreadsheet ID.', 'error');
+      setNotice('Google client ID is missing from app config.', 'error');
       return;
     }
     await waitForGoogleIdentityLibrary();
@@ -976,18 +722,8 @@ async function prepareSignIn() {
 
 async function handleGoogleTokenResponse(response) {
   if (response.error) {
-    if (state.pendingAuthRequest?.reject) {
-      state.pendingAuthRequest.reject(response);
-    }
+    if (state.pendingAuthRequest?.reject) state.pendingAuthRequest.reject(response);
     state.pendingAuthRequest = null;
-
-    if (isGoogleVerificationBlock(response)) {
-      setNotice(getGoogleVerificationHelpMessage(), 'error');
-      if (elements.oauthState) {
-        elements.oauthState.textContent = 'Google blocked this sign-in. Add the account to Test users in Google Cloud Console.';
-      }
-      return;
-    }
     setNotice(response.error_description || response.error || 'Google sign-in was cancelled.', 'error');
     return;
   }
@@ -1002,11 +738,20 @@ async function handleGoogleTokenResponse(response) {
     return;
   }
 
-  setLoading(true);
+  setLoading(true, 'Signing in...');
   setSignInState({ loading: true, enabled: false, label: 'Signing in...' });
 
   try {
-    const profilePayload = await fetchGoogleUserInfo(accessToken);
+    const profileResponse = await fetch('https://openidconnect.googleapis.com/v1/userinfo', {
+      headers: { authorization: `Bearer ${accessToken}` },
+      cache: 'no-store',
+      mode: 'cors',
+    });
+    const profilePayload = await profileResponse.json();
+    if (!profileResponse.ok) {
+      throw createApiError(profilePayload?.error_description || profilePayload?.error || 'Unable to load Google profile', profileResponse.status, profilePayload);
+    }
+
     state.session = {
       authenticated: true,
       accessToken,
@@ -1020,36 +765,43 @@ async function handleGoogleTokenResponse(response) {
     };
     persistSession(state.session);
     scheduleSessionExpiryTimer();
-    setAuthorizedState();
+    renderSessionBox();
 
-    if (state.pendingAuthRequest?.resolve) {
-      state.pendingAuthRequest.resolve(response);
-    }
+    if (state.pendingAuthRequest?.resolve) state.pendingAuthRequest.resolve(response);
     state.pendingAuthRequest = null;
 
-    setNotice('Signed in. Loading your private spreadsheet...');
-    await bootstrapSignedInView();
+    setNotice('Signed in. Your session is ready for future restricted mode.');
   } catch (error) {
-    if (state.pendingAuthRequest?.reject) {
-      state.pendingAuthRequest.reject(error);
-    }
+    if (state.pendingAuthRequest?.reject) state.pendingAuthRequest.reject(error);
     state.pendingAuthRequest = null;
-    if (error.status === 401) {
-      clearStoredSession();
-    }
+    clearRuntimeSession();
     setNotice(error.message || 'Google sign-in failed.', 'error');
   } finally {
     setLoading(false);
   }
 }
 
+function requestGoogleAccessToken() {
+  if (!state.authReady || !state.authClient) {
+    setNotice('Google sign-in is still preparing. Please try again in a moment.', 'error');
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    state.pendingAuthRequest = { resolve, reject };
+    try {
+      state.authClient.requestAccessToken();
+    } catch (error) {
+      state.pendingAuthRequest = null;
+      reject(error);
+    }
+  });
+}
+
 function handleGooglePopupError(error) {
   const type = error?.type || 'unknown';
   if (type === 'access_denied') {
-    setNotice(getGoogleVerificationHelpMessage(), 'error');
-    if (elements.oauthState) {
-      elements.oauthState.textContent = 'Google blocked this sign-in. Add the account to Test users in Google Cloud Console.';
-    }
+    setNotice('Google blocked this sign-in request.', 'error');
     return;
   }
   if (type === 'popup_closed') {
@@ -1063,23 +815,7 @@ function handleGooglePopupError(error) {
   setNotice('Google sign-in could not start.', 'error');
 }
 
-function showSignedInShell() {
-  elements.authPanel.classList.add('hidden');
-  elements.dashboard.classList.remove('hidden');
-  renderSessionBox();
-}
-
-function showSignedOutShell() {
-  elements.dashboard.classList.add('hidden');
-  elements.authPanel.classList.remove('hidden');
-  renderSessionBox();
-}
-
 async function requestSignIn() {
-  if (!state.authReady || !state.authClient) {
-    setNotice('Google sign-in is still preparing. Please try again in a moment.', 'error');
-    return;
-  }
   await requestGoogleAccessToken();
 }
 
@@ -1093,33 +829,29 @@ async function logoutUser() {
       // Logout should still succeed if revoke fails.
     }
   }
-  clearStoredSession();
-  clearSessionExpiryTimer();
-  await bootstrapSignedOutView();
-  await prepareSignIn();
-  setNotice('You have been logged out.');
+
+  clearRuntimeSession('You have been logged out.');
+  setSignInState({ loading: false, enabled: state.authReady, label: 'Continue with Google' });
 }
 
 function bindElements() {
-  elements.sessionBox = $('sessionBox');
   elements.notice = $('notice');
   elements.authPanel = $('authPanel');
   elements.dashboard = $('dashboard');
   elements.signInButton = $('signInButton');
-  elements.signInLabel = $('signInButton').querySelector('.button-label');
+  elements.signInLabel = $('signInButton')?.querySelector('.button-label');
   elements.oauthState = $('oauthState');
+  elements.sessionBox = $('sessionBox');
   elements.spreadsheetTitle = $('spreadsheetTitle');
   elements.sheetMeta = $('sheetMeta');
   elements.sheetTabs = $('sheetTabs');
+  elements.searchInput = $('searchInput');
+  elements.refreshButton = $('refreshButton');
+  elements.newButton = $('newButton');
   elements.sheetTitle = $('sheetTitle');
   elements.sheetSummary = $('sheetSummary');
   elements.rowCount = $('rowCount');
   elements.dataTable = $('dataTable');
-  elements.searchInput = $('searchInput');
-  elements.filterField = $('filterField');
-  elements.filterValue = $('filterValue');
-  elements.refreshButton = $('refreshButton');
-  elements.newButton = $('newButton');
   elements.detailStatus = $('detailStatus');
   elements.detailForm = $('detailForm');
   elements.saveButton = $('saveButton');
@@ -1127,71 +859,56 @@ function bindElements() {
   elements.cancelButton = $('cancelButton');
 }
 
+function bindEvents() {
+  elements.signInButton.addEventListener('click', requestSignIn);
+  elements.refreshButton.addEventListener('click', reloadMatrix);
+  elements.newButton.addEventListener('click', addBlankRow);
+  elements.saveButton.addEventListener('click', () => flushPendingSaves());
+  elements.deleteButton.addEventListener('click', clearAllErrors);
+  elements.cancelButton.addEventListener('click', reloadMatrix);
+  elements.searchInput.addEventListener('input', () => {
+    state.searchQuery = elements.searchInput.value;
+    renderGrid();
+  });
+}
+
 async function bootstrap() {
   bindElements();
+  bindEvents();
 
-  elements.signInButton.addEventListener('click', requestSignIn);
-  elements.refreshButton.addEventListener('click', async () => {
-    if (state.session) {
-      await refreshSheetLists(true);
-    }
-  });
-  elements.newButton.addEventListener('click', beginCreateRow);
-  elements.saveButton.addEventListener('click', saveRow);
-  elements.deleteButton.addEventListener('click', async () => {
-    if (state.selectedRow && confirm(`Delete row ${state.selectedRow.rowNumber}?`)) {
-      await deleteRow(state.selectedRow);
-    }
-  });
-  elements.cancelButton.addEventListener('click', () => {
-    state.mode = 'view';
-    state.selectedRow = null;
-    renderTable();
-    renderDetailForm();
-  });
-  elements.searchInput.addEventListener('input', () => {
-    state.search = elements.searchInput.value;
-    renderTable();
-  });
-  elements.filterField.addEventListener('change', () => {
-    state.filterField = elements.filterField.value;
-    state.filterValue = '';
-    populateFilterControls();
-    renderTable();
-  });
-  elements.filterValue.addEventListener('change', () => {
-    state.filterValue = elements.filterValue.value;
-    renderTable();
-  });
+  setNotice('');
+  renderSessionBox();
+  renderConnectionCard();
+  renderHeaderMeta();
+  renderDetailPanel();
+  if (elements.dashboard) {
+    elements.dashboard.classList.remove('hidden');
+  }
 
-  setSignInState({ loading: true, enabled: false, label: 'Preparing Google sign-in...' });
-  showSignedOutShell();
-  renderWorkspaceState();
-
-  const authSetup = prepareSignIn();
   const restoredSession = readStoredSession();
   if (restoredSession) {
     state.session = restoredSession;
-    setAuthorizedState();
     scheduleSessionExpiryTimer();
-    showSignedInShell();
-    renderWorkspaceState();
+    renderSessionBox();
     setNotice('Restored your saved Google session.');
-    await bootstrapSignedInView({ autoLoad: false });
-  } else {
-    await bootstrapSignedOutView();
   }
+
+  const authSetup = prepareSignIn();
+  await loadMatrixOnBoot();
+  await authSetup;
 
   const params = new URLSearchParams(window.location.search);
   if (params.get('error') === 'permission-denied') {
     setNotice('The Google account you signed in with does not have access to the private spreadsheet.', 'error');
   } else if (params.get('error') === 'login-failed') {
     setNotice('Google sign-in failed. Please try again.', 'error');
-  } else if (params.get('error') === 'verification-blocked') {
-    setNotice(getGoogleVerificationHelpMessage(), 'error');
   }
-
-  await authSetup;
 }
 
-bootstrap().catch((error) => setNotice(error.message, 'error'));
+window.addEventListener('error', (event) => {
+  if (String(event.error?.message || '').includes('CORS')) {
+    setNotice('The Apps Script web app request was blocked by CORS. If that happens, the browser must call the web app through a same-origin proxy.', 'error');
+  }
+});
+
+bootstrap().catch((error) => setNotice(error.message || 'Unexpected startup error', 'error'));

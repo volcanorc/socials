@@ -1,133 +1,101 @@
-Secure Google Spreadsheet Dashboard - Code Guide
+Secure Spreadsheet Grid - Code Guide
 
 Purpose
-- This app is a private dashboard for a Google Spreadsheet.
-- It uses Google Identity Services popup login in the browser, then direct Sheets API access tied to the signed-in Google account.
+- This app is now a browser-first spreadsheet dashboard backed by a Google Apps Script web app.
+- The frontend loads a live matrix from the Apps Script endpoint, renders it as a native editable table, and writes edits back with `POST { row, col, val }`.
 - The spreadsheet remains the source of truth in Google Drive.
-- The app does not permanently store spreadsheet contents, but it does persist the signed-in Google token in `localStorage` until expiry.
+- The browser still persists Google session state in `localStorage` so the UI can restore after refresh until the token expires.
 
-High-level flow
-1. User opens the site.
-2. The page reads `window.APP_CONFIG` for the Google client ID and spreadsheet ID.
-3. If the config is present, the page initializes the GIS token client.
-4. The user signs in through the Google popup.
-5. Google returns an access token to the browser.
-6. The browser fetches the Google profile and stores the token, expiry, and profile in `localStorage`.
-7. If the signed-in account can access the private spreadsheet, the dashboard loads sheet data and allows edits.
-8. If Google denies spreadsheet access, the app keeps the user signed in but shows a clear no-access state.
-9. Changes are written back to the original spreadsheet.
+Latest implementation summary
+- The old Google Sheets API direct-read/direct-write flow has been replaced on the frontend.
+- The current data source is the Apps Script web app URL in `window.APP_CONFIG.appsScriptUrl`.
+- `public/app.js` now contains a small API adapter:
+  - `requestSpreadsheet(method, body)` for transport
+  - `loadMatrixFromSource()` for `GET`
+  - `saveCellToSource(row, col, val)` for `POST`
+- The app now renders a full native HTML grid with editable inputs in each cell.
+- Changes autosave with a debounce, and save failures are shown inline without logging the user out.
+- The signed-in shell now stays visible while the grid loads, so the app does not block rendering behind a sheet-access preflight.
 
-Google Cloud Console note
-- If sign-in is blocked with `access_denied` and a message about the app being tested, the OAuth consent screen is still in Testing.
-- Add the Google account to the OAuth consent screen **Test users** list to allow sign-in during testing.
-- To allow non-test users later, switch the app to Production and submit it for Google verification.
+Current user-facing behavior
+1. The page opens.
+2. `public/index.html` defines `window.APP_CONFIG` and loads Google Identity Services plus the module client.
+3. `public/app.js` restores any saved session from `localStorage`.
+4. The app immediately requests the Apps Script web app with `GET`.
+5. The script returns the sheet as a JSON matrix from the active sheet.
+6. The browser renders the matrix into a responsive editable table.
+7. Each cell can be edited inline.
+8. When a cell changes, the browser sends `POST { row, col, val }` back to the Apps Script endpoint.
+9. The Apps Script deployment writes the new value into the sheet.
 
-Runtime configuration
-- The browser config lives in `public/index.html` as `window.APP_CONFIG`.
-- `googleClientId`, `spreadsheetId`, and `authScope` are the important browser config values.
-- The old `.env`-driven Node server path still exists for local preview, but the static deployment path does not depend on it.
+Important transport details
+- The current Apps Script deployment is expected to expose:
+  - `doGet(e)` that returns a JSON matrix
+  - `doPost(e)` that accepts JSON in the shape `{ row, col, val }`
+- The current script in the repo assumes the active sheet in the deployed spreadsheet context.
+- `public/app.js` keeps a future-friendly auth header hook via `forwardAuthToken`, but it is off by default.
+- Do not enable the auth header unless you are also handling CORS and you actually need it for a future restricted-mode transport.
+- If cross-origin fetches to `script.google.com` are blocked by the host, the frontend will need a same-origin proxy. The UI code is intentionally isolated so that transport can be swapped later without rewriting the grid renderer.
 
-Root files
-- `server.js`
-  - Main Node HTTP server.
-  - Serves the frontend files from `public/`.
-  - Exposes auth and Sheets API endpoints.
-  - Reads local `.env` before building the runtime config.
-  - Owns session cookie handling, OAuth state checks, and Google code exchange.
-- `package.json`
-  - Minimal package manifest.
-  - Scripts:
-    - `start`: runs `node server.js`
-    - `test`: runs `node --test`
-- `README.md`
-  - User-facing setup and security notes.
-- `guide.txt`
-  - This developer-oriented map for the next AI.
-- `.env.example`
-  - Template for local runtime config.
-- `.gitignore`
-  - Ignores `node_modules`, `.env`, logs, and common junk.
-
-Folder: `lib/`
-- `lib/session.js`
-  - Cookie parsing and serialization.
-  - Encrypted session cookie creation and reading.
-  - OAuth state cookie helpers.
-  - Random state generation for auth protection.
-- `lib/google.js`
-  - Low-level Google API helpers.
-  - OAuth token exchange and refresh.
-  - User info fetch.
-  - Spreadsheet metadata and sheet value fetches.
-  - Sheet row append/update/delete helpers.
-  - Table parsing helpers for converting Sheets rows into app rows.
-- `lib/google-access.js`
-  - Higher-level permission gate.
-  - Ensures the session is valid, refreshes tokens if needed, and verifies spreadsheet access.
-  - Loads a worksheet for the dashboard.
-  - Adds, updates, and removes rows while keeping the spreadsheet as the source of truth.
-  - Performs the Google login completion step after the popup returns a code.
-
-Folder: `public/`
+Files and responsibilities
 - `public/index.html`
-  - Main page shell.
-  - Minimal auth card when signed out.
-  - Dashboard layout when signed in.
-  - Defines `window.APP_CONFIG`, then loads Google Identity Services and the app JS module.
+  - Defines `window.APP_CONFIG` with `googleClientId`, `spreadsheetId`, `appsScriptUrl`, and `authScope`.
+  - Provides the auth card, dashboard shell, and button labels for the native grid flow.
 - `public/app.js`
-  - Frontend state and all browser behavior.
-  - Restores saved auth from `localStorage` and refreshes it on expiry.
-  - Launches the Google popup and reads the token directly in the browser.
-  - Renders session info, spreadsheet tabs, search/filter controls, row table, and row editor panel.
-  - Handles create/edit/delete actions through the direct Google Sheets API.
-  - Switches between signed-out and signed-in views.
+  - Session persistence and Google sign-in bootstrap.
+  - Apps Script GET/POST adapter.
+  - Matrix normalization, rendering, edit tracking, debounce autosave, and save-error handling.
+  - Dashboard shell behavior, row addition, refresh, and error clearing.
 - `public/styles.css`
-  - Full UI styling.
-  - Material-leaning visual style.
-  - Uses `Poppins` for display text and `Inter` for body text.
-  - Controls layout, cards, table styling, buttons, and responsive behavior.
+  - Layout for the dashboard, toolbar, table, and detail panel.
+  - Cell states for dirty, saving, and error conditions.
+- `README.md`
+  - User-facing summary of the Apps Script transport and setup.
+- `guide.txt`
+  - This internal handoff doc for the next AI.
+- `server.js`
+  - Legacy Node backend for the older Sheets-API path.
+  - Still in the repo, but not required for the current static Apps Script flow.
 
-Folder: `test/`
-- `test/helpers.test.js`
-  - Lightweight unit tests for the helper layer.
-  - Verifies sheet column conversion, sheet parsing, cookie round-tripping, and random state generation.
+What changed most recently
+- The guide was rewritten to describe the Apps Script web app architecture instead of the old Sheets API backend path.
+- The frontend now exposes the dashboard shell immediately, which means the sheet can load without hiding behind the auth card.
+- A `Clear errors` button was wired to clear inline cell-error state instead of accidentally adding a row.
+- Toolbar and table styles were updated for the native grid, including sticky row numbers and editable input states.
+- The browser runtime was verified to render the sheet data correctly from the Apps Script endpoint.
 
-Server routes
-- `GET /`
-  - Serves the app shell.
-- `GET /api/auth/config`
-  - Returns GIS client config and sets the OAuth state cookie.
-- `POST /auth/callback`
-  - Receives the auth code from the popup flow.
-  - Exchanges it for Google tokens and creates the session cookie.
-- `GET /api/session`
-  - Returns current session/auth status.
-- `GET /api/spreadsheet`
-  - Returns spreadsheet title and worksheet list after permission validation.
-- `GET /api/sheet?sheet=...`
-  - Loads rows for one worksheet.
-- `POST /api/sheet?sheet=...`
-  - Appends a row.
-- `PUT /api/sheet?sheet=...&rowNumber=...`
-  - Updates a row.
-- `DELETE /api/sheet?sheet=...&rowNumber=...`
-  - Deletes a row.
-- `POST /auth/logout`
-  - Clears the session and OAuth state cookies.
+Why the previous approach changed
+- The earlier browser-only Google Sheets API path depended on direct spreadsheet permission checks and a lot of auth-state handling that did not match the current Apps Script deployment.
+- The user provided a deployed Apps Script web app URL, so the cleanest implementation is to treat that script as the transport layer and make the frontend UI a native grid on top of it.
+- This keeps the grid simple, makes the save path explicit, and avoids forcing the app through the wrong permission model.
 
-Static deployment note
-- For GitHub Pages or any other static host, you only need the files under `public/`.
-- The browser talks directly to Google Sheets, so there is no backend callback required for the static path.
+Session persistence notes
+- The browser stores:
+  - access token
+  - token expiry
+  - basic profile information
+- These values live in `localStorage` under `native-grid.auth.v1`.
+- Logout clears the stored session.
+- On refresh, the session restores until the token is close to expiry.
+- The stored session is for UI convenience and future restricted-mode compatibility; the live spreadsheet data still comes from the Apps Script endpoint.
 
-Important implementation notes
-- The browser never talks directly to Google Sheets.
-- The server owns the token exchange and access checks.
-- The app only shows data after Google confirms the signed-in account can access the spreadsheet.
-- The repo intentionally does not store the Google client secret.
-- The local `.env` is the runtime source for credentials during development.
+Future restricted-mode direction
+- If you later switch the Apps Script deployment to restricted mode, keep the auth module separate from the grid renderer.
+- The next transport could:
+  - forward a bearer token if needed
+  - route through a same-origin proxy
+  - switch to a backend-backed Google API client
+- The current code already isolates the transport in `requestSpreadsheet()`, `loadMatrixFromSource()`, and `saveCellToSource()`.
 
-If you extend this app
-- Keep auth state in the server, not in the browser.
-- Keep spreadsheet access checks on every data-loading route.
-- Do not expose the spreadsheet or tokens to the client.
-- Update this guide if you add new folders, routes, or auth/storage behavior.
+Testing
+- `node --test`
+- Browser check:
+  - open the static site
+  - confirm the grid loads from the Apps Script endpoint
+  - edit a cell and confirm the browser posts `{ row, col, val }`
+  - refresh and confirm the saved session restores from `localStorage`
+
+If you extend this again
+- Keep the transport adapter isolated in `public/app.js`.
+- Keep the grid editable even when an individual cell save fails.
+- Do not move the app back to the older Sheets API flow unless the product requirement changes.

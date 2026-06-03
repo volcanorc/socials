@@ -1,53 +1,64 @@
-# Secure Google Spreadsheet Dashboard
+# Secure Spreadsheet Grid
 
-Browser-only dashboard for a private Google Spreadsheet. The app authenticates with Google in the browser, persists the signed-in state in `localStorage` until the access token expires, and loads or mutates data directly through the Google Sheets API.
+Browser-first dashboard that renders a live Google Sheet as a native editable grid. The current deployment path talks to a Google Apps Script web app, not to the Google Sheets API directly.
 
 ## What it does
 
-- Preserves Google sign-in until explicit logout
-- Uses the signed-in user's Google permissions to access the private spreadsheet
-- Denies access automatically if the account cannot open the spreadsheet
-- Lets you browse, search, filter, view, edit, add, and delete rows
-- Keeps Google Sheets as the source of truth
-- Does not store spreadsheet contents permanently in the app
+- Loads the sheet matrix with `GET` from the Apps Script web app
+- Renders the data as a responsive HTML table
+- Lets you edit any cell inline
+- Autosaves each cell back with `POST { row, col, val }`
+- Persists the signed-in Google session in `localStorage` until the token expires
+- Keeps the UI ready for future restricted-mode auth, without depending on it today
+
+## Current data flow
+
+1. `public/index.html` defines `window.APP_CONFIG`.
+2. `public/app.js` reads `appsScriptUrl` from that config.
+3. On page load, the app sends a `GET` request to the Apps Script web app URL.
+4. The script returns a JSON matrix from the active sheet.
+5. The browser renders the matrix into an editable grid.
+6. Editing a cell sends a `POST` request with `{ row, col, val }`.
+7. The Apps Script web app writes the change back to the spreadsheet.
+
+## Apps Script contract
+
+The deployed script is expected to expose:
+
+- `doGet(e)` returning a JSON 2D array
+- `doPost(e)` accepting JSON like:
+
+```json
+{ "row": 1, "col": 1, "val": "Hello" }
+```
+
+The current script updates the active sheet of the spreadsheet attached to that deployment.
 
 ## Setup
 
-1. Edit `public/index.html` and update the `window.APP_CONFIG` values if needed:
-   - `googleClientId`
-   - `spreadsheetId`
-   - `authScope`
-2. Deploy the `public/` folder as a static site, or open it through your preferred static host.
-3. If you want to preview locally with the bundled Node server, you can still use the existing launcher scripts:
+1. Open [public/index.html](/C:/Users/Marketing/Documents/Codex/2026-06-03/pull-this-github-repo-and-start/public/index.html) and confirm `window.APP_CONFIG.appsScriptUrl` points to your deployed Apps Script web app.
+2. Keep `googleClientId` and `authScope` set for Google sign-in.
+3. Deploy the files under `public/` to your static host.
+4. Make sure your Apps Script deployment is configured so the browser can call it successfully.
 
-```bash
-powershell -ExecutionPolicy Bypass -File run-server.ps1
-```
+## Session persistence
 
-For the simplest Windows workflow, double-click `start-local.cmd`.
-
-## Google OAuth notes
-
-- Create a Google OAuth client for a web application.
-- Add the origin where you host the static app to the OAuth client configuration as an authorized JavaScript origin.
-- For local popup mode, make sure the static origin matches the OAuth client configuration exactly, for example `http://127.0.0.1:3000`.
-- The app requests `openid`, `email`, `profile`, and Google Sheets access.
-- The spreadsheet itself must remain private in Google Drive.
-- The browser stores the signed-in Google access token in `localStorage` so refreshes can reopen the dashboard until the token expires.
-- If Google shows `Access blocked` or `Error 403: access_denied` with a message about the app being tested, open the OAuth consent screen in Google Cloud Console and add the signed-in Google account to **Test users**.
-- While the app stays in Testing, only test users can sign in. To let any Google account use it, move the app to **Production** and complete Google verification.
-
-## GitHub hosting note
-
-- A static GitHub Pages site can host the UI because the browser talks to Google directly now.
-- The spreadsheet ID is not secret, so exposing it in client config is acceptable.
+- The browser stores the Google access token, expiry, and profile in `localStorage`.
+- Refreshing the page restores the session until the token expires.
+- Logout clears the stored session.
+- The stored session is for UI convenience only; the spreadsheet data still comes from the live web app.
 
 ## Security model
 
-- The browser talks directly to Google Sheets after sign-in
-- Access is still governed by Google's existing file permissions
-- A signed-in user can load and edit the spreadsheet only if Google Drive already grants that account access
-- Signed-in but unauthorized users get a clear no-access state instead of a silent logout
+- The spreadsheet remains the source of truth in Google Drive.
+- A signed-in user can edit cells only if the Apps Script deployment and spreadsheet permissions allow it.
+- The browser is not using an HttpOnly cookie session for the current static flow.
+- The spreadsheet ID is not secret and is safe to expose in `window.APP_CONFIG`.
+
+## Notes
+
+- If browser calls to `script.google.com` are blocked by CORS in your hosting environment, the frontend will need a same-origin proxy.
+- The legacy Node backend files are still in the repo, but the current static path does not depend on them.
 
 ## Tests
 
