@@ -1,6 +1,6 @@
 # Secure Google Spreadsheet Dashboard
 
-Local-first dashboard for a private Google Spreadsheet. The app authenticates with Google, checks the signed-in account's existing permission on the spreadsheet, and only then loads or mutates data through the Google Sheets API.
+Browser-only dashboard for a private Google Spreadsheet. The app authenticates with Google in the browser, persists the signed-in state in `localStorage` until the access token expires, and loads or mutates data directly through the Google Sheets API.
 
 ## What it does
 
@@ -13,13 +13,12 @@ Local-first dashboard for a private Google Spreadsheet. The app authenticates wi
 
 ## Setup
 
-1. Copy `.env.example` to `.env`
-2. Fill in your Google OAuth values in `.env`:
-   - `GOOGLE_CLIENT_ID`
-   - `GOOGLE_CLIENT_SECRET`
-   - `GOOGLE_REDIRECT_URI`
-3. Keep `SPREADSHEET_ID` set to the provided spreadsheet ID unless you want to target a different private sheet later.
-4. Start the app:
+1. Edit `public/index.html` and update the `window.APP_CONFIG` values if needed:
+   - `googleClientId`
+   - `spreadsheetId`
+   - `authScope`
+2. Deploy the `public/` folder as a static site, or open it through your preferred static host.
+3. If you want to preview locally with the bundled Node server, you can still use the existing launcher scripts:
 
 ```bash
 powershell -ExecutionPolicy Bypass -File run-server.ps1
@@ -27,31 +26,28 @@ powershell -ExecutionPolicy Bypass -File run-server.ps1
 
 For the simplest Windows workflow, double-click `start-local.cmd`.
 
-The launcher will try a cached portable Node runtime first, then a system-wide Node install, and if neither exists it will download a portable Node runtime into `.node-cache` the first time you run it.
-
 ## Google OAuth notes
 
 - Create a Google OAuth client for a web application.
-- Add the origin from `GOOGLE_REDIRECT_URI` to the OAuth client configuration as an authorized JavaScript origin.
-- For local popup mode, `GOOGLE_REDIRECT_URI` should match the app origin exactly, for example `http://127.0.0.1:3001`.
+- Add the origin where you host the static app to the OAuth client configuration as an authorized JavaScript origin.
+- For local popup mode, make sure the static origin matches the OAuth client configuration exactly, for example `http://127.0.0.1:3000`.
 - The app requests `openid`, `email`, `profile`, and Google Sheets access.
 - The spreadsheet itself must remain private in Google Drive.
-- The server automatically reads local `.env` values at startup.
-- Local startup is self-contained, so you do not need `node` on PATH if the launcher can fetch its portable runtime once.
+- The browser stores the signed-in Google access token in `localStorage` so refreshes can reopen the dashboard until the token expires.
 - If Google shows `Access blocked` or `Error 403: access_denied` with a message about the app being tested, open the OAuth consent screen in Google Cloud Console and add the signed-in Google account to **Test users**.
 - While the app stays in Testing, only test users can sign in. To let any Google account use it, move the app to **Production** and complete Google verification.
 
 ## GitHub hosting note
 
-- The repository can live on GitHub, but the Google OAuth code exchange still needs a running backend.
-- A static GitHub Pages site can host the UI, but it cannot safely replace the server-side OAuth callback and Sheets access layer.
+- A static GitHub Pages site can host the UI because the browser talks to Google directly now.
+- The spreadsheet ID is not secret, so exposing it in client config is acceptable.
 
 ## Security model
 
-- The browser never talks directly to Google Sheets
-- All access is server-side and tied to the currently signed-in Google account
-- There is no separate app allowlist
-- Access depends entirely on Google's existing file permissions
+- The browser talks directly to Google Sheets after sign-in
+- Access is still governed by Google's existing file permissions
+- A signed-in user can load and edit the spreadsheet only if Google Drive already grants that account access
+- Signed-in but unauthorized users get a clear no-access state instead of a silent logout
 
 ## Tests
 

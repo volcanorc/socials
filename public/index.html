@@ -7,6 +7,13 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Poppins:wght@500;600;700;800&display=swap" rel="stylesheet" />
+    <script>
+      window.APP_CONFIG = {
+        googleClientId: '200733782466-fimsnk62ainlnrholpjgbmc9s20jghuh.apps.googleusercontent.com',
+        spreadsheetId: '1O2bRxJpxJRBVgv676W5oT0apVkHP_lWYYaDcG1axeCU',
+        authScope: 'openid email profile https://www.googleapis.com/auth/spreadsheets',
+      };
+    </script>
     <script src="https://accounts.google.com/gsi/client" async defer></script>
     <link rel="stylesheet" href="/styles.css" />
     <script type="module" src="/app.js"></script>
@@ -49,7 +56,7 @@
           <aside class="sidebar">
             <div class="panel">
               <div class="panel-label">Spreadsheet</div>
-              <div id="spreadsheetTitle" class="panel-title">Loading…</div>
+              <div id="spreadsheetTitle" class="panel-title">Loading...</div>
               <div id="sheetMeta" class="panel-meta"></div>
             </div>
             <div class="panel">
@@ -62,7 +69,7 @@
             <div class="toolbar">
               <div class="search-group">
                 <label for="searchInput">Search</label>
-                <input id="searchInput" type="search" placeholder="Search rows…" />
+                <input id="searchInput" type="search" placeholder="Search rows..." />
               </div>
               <div class="filter-group">
                 <label for="filterField">Filter field</label>

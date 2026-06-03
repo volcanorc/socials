@@ -1,3 +1,10 @@
+const APP_CONFIG = window.APP_CONFIG || {};
+const GOOGLE_CLIENT_ID = APP_CONFIG.googleClientId || '';
+const SPREADSHEET_ID = APP_CONFIG.spreadsheetId || '';
+const AUTH_SCOPE = APP_CONFIG.authScope || 'openid email profile https://www.googleapis.com/auth/spreadsheets';
+const AUTH_STORAGE_KEY = 'secure-google-dashboard.auth.v1';
+const SESSION_EXPIRY_SKEW_MS = 60_000;
+
 const state = {
   session: null,
   spreadsheetTitle: '',
@@ -10,14 +17,14 @@ const state = {
   filterValue: '',
   selectedRow: null,
   mode: 'view',
-  authConfig: {
-    clientId: '200733782466-fimsnk62ainlnrholpjgbmc9s20jghuh.apps.googleusercontent.com',
-    scope: 'openid email profile https://www.googleapis.com/auth/spreadsheets',
-  },
+  accessState: 'signed-out',
+  accessMessage: '',
   authClient: null,
   authReady: false,
   pendingAuthRequest: null,
 };
+
+let sessionExpiryTimer = null;
 
 const elements = {};
 
@@ -32,6 +39,101 @@ function escapeHtml(value) {
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
+}
+
+function readStoredSession() {
+  try {
+    const raw = window.localStorage.getItem(AUTH_STORAGE_KEY);
+    if (!raw) return null;
+
+    const parsed = JSON.parse(raw);
+    const expiresAt = Number(parsed?.expiresAt);
+    if (!parsed?.accessToken || !Number.isFinite(expiresAt)) {
+      window.localStorage.removeItem(AUTH_STORAGE_KEY);
+      return null;
+    }
+
+    if (Date.now() >= expiresAt - SESSION_EXPIRY_SKEW_MS) {
+      window.localStorage.removeItem(AUTH_STORAGE_KEY);
+      return null;
+    }
+
+    return {
+      authenticated: true,
+      accessToken: parsed.accessToken,
+      expiresAt,
+      profile: {
+        id: String(parsed.profile?.id || ''),
+        email: String(parsed.profile?.email || ''),
+        name: String(parsed.profile?.name || parsed.profile?.email || ''),
+        picture: String(parsed.profile?.picture || ''),
+      },
+    };
+  } catch {
+    try {
+      window.localStorage.removeItem(AUTH_STORAGE_KEY);
+    } catch {
+      // Ignore storage cleanup errors.
+    }
+    return null;
+  }
+}
+
+function persistSession(session) {
+  try {
+    window.localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({
+      accessToken: session.accessToken,
+      expiresAt: session.expiresAt,
+      profile: session.profile,
+    }));
+  } catch {
+    // Ignore storage quota or privacy-mode failures.
+  }
+}
+
+function clearStoredSession() {
+  try {
+    window.localStorage.removeItem(AUTH_STORAGE_KEY);
+  } catch {
+    // Ignore storage cleanup errors.
+  }
+}
+
+function isSessionExpired(session) {
+  return !session?.accessToken || !Number.isFinite(Number(session?.expiresAt)) || Date.now() >= Number(session.expiresAt) - SESSION_EXPIRY_SKEW_MS;
+}
+
+function resetWorkspaceState() {
+  state.spreadsheetTitle = '';
+  state.sheets = [];
+  state.sheetName = '';
+  state.sheetData = null;
+  state.search = '';
+  state.filterField = '';
+  state.filterValue = '';
+  state.selectedRow = null;
+  state.mode = 'view';
+}
+
+function renderWorkspaceState() {
+  renderSessionBox();
+  renderSheetTabs();
+  renderSheetMeta();
+  renderTable();
+  renderDetailForm();
+  syncActionButtons();
+}
+
+function setNoAccessState(message) {
+  state.accessState = 'no-access';
+  state.accessMessage = message;
+  resetWorkspaceState();
+  renderWorkspaceState();
+}
+
+function setAuthorizedState() {
+  state.accessState = 'authorized';
+  state.accessMessage = '';
 }
 
 const GOOGLE_SHEETS_BASE = 'https://sheets.googleapis.com/v4/spreadsheets';
@@ -208,15 +310,16 @@ function setNotice(message, kind = 'info') {
 
 function setLoading(isLoading) {
   state.loading = isLoading;
-  elements.refreshButton.disabled = isLoading;
-  elements.newButton.disabled = isLoading || !state.sheetData?.headers?.length;
+  elements.refreshButton.disabled = isLoading || !state.session;
+  elements.newButton.disabled = isLoading || state.accessState !== 'authorized' || !state.sheetData?.headers?.length;
   syncActionButtons();
 }
 
 function syncActionButtons() {
-  const hasSheet = Boolean(state.sheetData?.headers?.length);
-  elements.saveButton.disabled = state.loading || !hasSheet;
-  elements.deleteButton.disabled = state.loading || !state.selectedRow || state.mode === 'create';
+  const hasEditableSheet = state.accessState === 'authorized' && Boolean(state.sheetData?.headers?.length);
+  const canSave = state.mode === 'create' ? hasEditableSheet : Boolean(state.selectedRow) && hasEditableSheet;
+  elements.saveButton.disabled = state.loading || !canSave;
+  elements.deleteButton.disabled = state.loading || !hasEditableSheet || !state.selectedRow || state.mode === 'create';
   elements.cancelButton.disabled = state.loading || (!state.selectedRow && state.mode !== 'create');
 }
 
@@ -247,6 +350,73 @@ function isGoogleVerificationBlock(response) {
 
 function getGoogleVerificationHelpMessage() {
   return 'Google blocked this sign-in because the OAuth app is still in Testing or this Google account is not listed as a Test user. In Google Cloud Console, open APIs & Services > OAuth consent screen > Test users, add this account, then try again. If you want everyone to sign in, publish the app and submit it for verification.';
+}
+
+function clearSessionExpiryTimer() {
+  if (sessionExpiryTimer) {
+    clearTimeout(sessionExpiryTimer);
+    sessionExpiryTimer = null;
+  }
+}
+
+function scheduleSessionExpiryTimer() {
+  clearSessionExpiryTimer();
+  if (!state.session?.expiresAt) return;
+
+  const delay = Math.max(0, Number(state.session.expiresAt) - Date.now() - SESSION_EXPIRY_SKEW_MS);
+  sessionExpiryTimer = setTimeout(() => {
+    if (isSessionExpired(state.session)) {
+      void handleExpiredSession('Your Google sign-in expired. Please sign in again.');
+    } else {
+      scheduleSessionExpiryTimer();
+    }
+  }, delay);
+}
+
+function getLiveSession() {
+  if (!state.session) return null;
+  if (isSessionExpired(state.session)) return null;
+  return state.session;
+}
+
+async function handleExpiredSession(message = 'Your Google sign-in expired. Please sign in again.') {
+  clearSessionExpiryTimer();
+  await bootstrapSignedOutView(message);
+  await prepareSignIn();
+}
+
+async function bootstrapSignedOutView(message = '') {
+  clearSessionExpiryTimer();
+  state.session = null;
+  state.accessState = 'signed-out';
+  state.accessMessage = '';
+  state.authReady = false;
+  state.authClient = null;
+  state.pendingAuthRequest = null;
+  clearStoredSession();
+  resetWorkspaceState();
+  showSignedOutShell();
+  renderWorkspaceState();
+  setSignInState({ loading: true, enabled: false, label: 'Preparing Google sign-in...' });
+  if (message) {
+    setNotice(message, 'error');
+  } else {
+    setNotice('');
+  }
+}
+
+async function bootstrapSignedInView({ autoLoad = true } = {}) {
+  showSignedInShell();
+  if (!autoLoad) {
+    renderWorkspaceState();
+    setNotice('Session restored. Click Refresh to load the spreadsheet.', 'info');
+    return;
+  }
+
+  const authorized = await refreshSheetLists();
+  if (authorized && state.sheets.length && state.accessState === 'authorized') {
+    await selectSheet(state.sheets[0].title);
+  }
 }
 
 function renderSessionBox() {
@@ -282,6 +452,14 @@ function renderSheetTabs() {
   const container = elements.sheetTabs;
   container.innerHTML = '';
 
+  if (state.accessState === 'no-access') {
+    const message = document.createElement('div');
+    message.className = 'panel-meta';
+    message.textContent = 'This signed-in account cannot open the restricted spreadsheet.';
+    container.appendChild(message);
+    return;
+  }
+
   state.sheets.forEach((sheet) => {
     const button = document.createElement('button');
     button.className = `sheet-tab ${sheet.title === state.sheetName ? 'active' : ''}`;
@@ -292,6 +470,22 @@ function renderSheetTabs() {
 }
 
 function renderSheetMeta() {
+  if (!state.session?.authenticated) {
+    elements.spreadsheetTitle.textContent = 'Private spreadsheet';
+    elements.sheetMeta.textContent = 'Choose a worksheet to view rows.';
+    elements.sheetTitle.textContent = 'Select a worksheet';
+    elements.sheetSummary.textContent = 'The dashboard is waiting for a worksheet selection.';
+    return;
+  }
+
+  if (state.accessState === 'no-access') {
+    elements.spreadsheetTitle.textContent = state.spreadsheetTitle || 'Restricted spreadsheet';
+    elements.sheetMeta.textContent = 'Signed in, but this account does not have spreadsheet access.';
+    elements.sheetTitle.textContent = 'No access to this spreadsheet';
+    elements.sheetSummary.textContent = state.accessMessage || 'Google denied permission for this account.';
+    return;
+  }
+
   elements.spreadsheetTitle.textContent = state.spreadsheetTitle || 'Private spreadsheet';
   elements.sheetMeta.textContent = state.sheetName
     ? `${state.sheets.length} worksheet${state.sheets.length === 1 ? '' : 's'} available`
@@ -362,6 +556,12 @@ function renderTable() {
   const tbody = elements.dataTable.querySelector('tbody');
   thead.innerHTML = '';
   tbody.innerHTML = '';
+
+  if (state.accessState === 'no-access') {
+    thead.innerHTML = '<tr><th>Status</th></tr>';
+    tbody.innerHTML = `<tr><td>${escapeHtml(state.accessMessage || 'This signed-in account cannot open the restricted spreadsheet.')}</td></tr>`;
+    return;
+  }
 
   if (!headers.length) {
     thead.innerHTML = '<tr><th>No columns</th></tr>';
@@ -445,6 +645,12 @@ function renderDetailForm() {
   const headers = state.sheetData?.headers || [];
   form.innerHTML = '';
 
+  if (state.accessState === 'no-access') {
+    elements.detailStatus.textContent = state.accessMessage || 'This signed-in account cannot open the restricted spreadsheet.';
+    syncActionButtons();
+    return;
+  }
+
   if (!state.sheetName) {
     elements.detailStatus.textContent = 'Select a worksheet first.';
     syncActionButtons();
@@ -515,19 +721,26 @@ function beginCreateRow() {
 
 async function saveRow() {
   if (!state.sheetName || !state.sheetData?.headers?.length) return;
+  const session = getLiveSession();
+  if (!session) {
+    if (state.session) {
+      await handleExpiredSession();
+    }
+    return;
+  }
   const values = collectFormValues();
   setLoading(true);
   try {
     if (state.mode === 'create') {
       await appendSheetRow({
         sheetName: state.sheetName,
-        accessToken: state.session?.accessToken,
+        accessToken: session.accessToken,
         values: buildRowValues(state.sheetData.headers, values),
       });
     } else if (state.selectedRow) {
       await updateSheetRow({
         sheetName: state.sheetName,
-        accessToken: state.session?.accessToken,
+        accessToken: session.accessToken,
         rowNumber: state.selectedRow.rowNumber,
         values: buildRowValues(state.sheetData.headers, values),
         columnCount: Math.max(state.sheetData.headers.length, 1),
@@ -536,10 +749,20 @@ async function saveRow() {
 
     state.mode = 'view';
     state.selectedRow = null;
-    await loadSheet(state.sheetName);
-    await refreshSheetLists();
+    const reloaded = await loadSheet(state.sheetName);
+    if (!reloaded) return;
+    const refreshed = await refreshSheetLists();
+    if (!refreshed) return;
     setNotice('Changes were synced back to Google Sheets.');
   } catch (error) {
+    if (error.status === 401) {
+      await handleExpiredSession('Your Google sign-in expired. Please sign in again.');
+      return;
+    }
+    if (error.status === 403) {
+      setNotice('This signed-in account can read the spreadsheet, but it cannot edit rows.', 'error');
+      return;
+    }
     setNotice(error.message, 'error');
   } finally {
     setLoading(false);
@@ -548,19 +771,36 @@ async function saveRow() {
 
 async function deleteRow(row = state.selectedRow) {
   if (!row) return;
+  const session = getLiveSession();
+  if (!session) {
+    if (state.session) {
+      await handleExpiredSession();
+    }
+    return;
+  }
   setLoading(true);
   try {
     await deleteSheetRow({
       sheetId: state.sheetData?.sheetId,
-      accessToken: state.session?.accessToken,
+      accessToken: session.accessToken,
       rowNumber: row.rowNumber,
     });
     state.selectedRow = null;
     state.mode = 'view';
-    await loadSheet(state.sheetName);
-    await refreshSheetLists();
+    const reloaded = await loadSheet(state.sheetName);
+    if (!reloaded) return;
+    const refreshed = await refreshSheetLists();
+    if (!refreshed) return;
     setNotice('Row deleted and synced back to Google Sheets.');
   } catch (error) {
+    if (error.status === 401) {
+      await handleExpiredSession('Your Google sign-in expired. Please sign in again.');
+      return;
+    }
+    if (error.status === 403) {
+      setNotice('This signed-in account can read the spreadsheet, but it cannot delete rows.', 'error');
+      return;
+    }
     setNotice(error.message, 'error');
   } finally {
     setLoading(false);
@@ -591,8 +831,17 @@ async function selectSheet(sheetName, triggerLoad = true) {
 async function loadSheet(sheetName) {
   setLoading(true);
   try {
-    const values = await fetchSheetValues(sheetName, state.session?.accessToken);
+    const session = getLiveSession();
+    if (!session) {
+      if (state.session) {
+        await handleExpiredSession();
+      }
+      return false;
+    }
+
+    const values = await fetchSheetValues(sheetName, session.accessToken);
     const data = parseSheetTable(values);
+    setAuthorizedState();
     state.sheetData = {
       ...data,
       sheetName,
@@ -603,37 +852,63 @@ async function loadSheet(sheetName) {
     renderSheetMeta();
     renderTable();
     renderDetailForm();
+    return true;
   } catch (error) {
-    if (error.status === 403) {
-      setNotice('Google denied access to this spreadsheet for the signed-in account.', 'error');
-      state.sheetData = null;
-      state.sheetName = '';
-      renderSheetMeta();
-      renderTable();
-      renderDetailForm();
-    } else {
-      setNotice(error.message, 'error');
+    if (error.status === 401) {
+      await handleExpiredSession('Your Google sign-in expired. Please sign in again.');
+      return false;
     }
+    if (error.status === 403) {
+      const message = 'This signed-in Google account does not have permission to open the restricted spreadsheet.';
+      setNoAccessState(message);
+      setNotice(message, 'error');
+      return false;
+    }
+    setNotice(error.message, 'error');
+    return false;
   } finally {
     setLoading(false);
   }
 }
 
 async function refreshSheetLists(autoLoad = false) {
-  const metadata = await fetchSpreadsheetMetadata(state.session?.accessToken);
-  state.spreadsheetTitle = metadata.properties?.title || state.spreadsheetTitle;
-  state.sheets = (metadata.sheets || []).map((sheet) => ({
-    title: sheet.properties?.title || 'Untitled',
-    sheetId: sheet.properties?.sheetId ?? null,
-  }));
-  renderSessionBox();
-  renderSheetTabs();
-  renderSheetMeta();
-  if (!state.sheetName && state.sheets.length) {
-    state.sheetName = state.sheets[0].title;
+  const session = getLiveSession();
+  if (!session) {
+    if (state.session) {
+      await handleExpiredSession('Your Google sign-in expired. Please sign in again.');
+    }
+    return false;
   }
-  if (autoLoad && state.sheetName) {
-    await loadSheet(state.sheetName);
+
+  try {
+    const metadata = await fetchSpreadsheetMetadata(session.accessToken);
+    state.spreadsheetTitle = metadata.properties?.title || state.spreadsheetTitle;
+    state.sheets = (metadata.sheets || []).map((sheet) => ({
+      title: sheet.properties?.title || 'Untitled',
+      sheetId: sheet.properties?.sheetId ?? null,
+    }));
+    setAuthorizedState();
+    renderWorkspaceState();
+    if (!state.sheetName && state.sheets.length) {
+      state.sheetName = state.sheets[0].title;
+    }
+    if (autoLoad && state.sheetName) {
+      return await loadSheet(state.sheetName);
+    }
+    return true;
+  } catch (error) {
+    if (error.status === 401) {
+      await handleExpiredSession('Your Google sign-in expired. Please sign in again.');
+      return false;
+    }
+    if (error.status === 403) {
+      const message = 'This signed-in Google account does not have permission to open the restricted spreadsheet.';
+      setNoAccessState(message);
+      setNotice(message, 'error');
+      return false;
+    }
+    setNotice(error.message, 'error');
+    return false;
   }
 }
 
@@ -652,11 +927,11 @@ async function waitForGoogleIdentityLibrary() {
 }
 
 function initGoogleTokenClient() {
-  if (!state.authConfig || !window.google?.accounts?.oauth2) return;
+  if (!GOOGLE_CLIENT_ID || !window.google?.accounts?.oauth2) return;
 
   state.authClient = window.google.accounts.oauth2.initTokenClient({
-    client_id: state.authConfig.clientId,
-    scope: state.authConfig.scope,
+    client_id: GOOGLE_CLIENT_ID,
+    scope: AUTH_SCOPE,
     include_granted_scopes: true,
     callback: handleGoogleTokenResponse,
   });
@@ -684,6 +959,12 @@ function requestGoogleAccessToken() {
 async function prepareSignIn() {
   setSignInState({ loading: true, enabled: false });
   try {
+    if (!GOOGLE_CLIENT_ID || !SPREADSHEET_ID) {
+      state.authReady = false;
+      setSignInState({ loading: false, enabled: false, label: 'Google sign-in unavailable' });
+      setNotice('App config is missing the Google client ID or spreadsheet ID.', 'error');
+      return;
+    }
     await waitForGoogleIdentityLibrary();
     initGoogleTokenClient();
   } catch (error) {
@@ -737,6 +1018,9 @@ async function handleGoogleTokenResponse(response) {
         picture: profilePayload.picture || '',
       },
     };
+    persistSession(state.session);
+    scheduleSessionExpiryTimer();
+    setAuthorizedState();
 
     if (state.pendingAuthRequest?.resolve) {
       state.pendingAuthRequest.resolve(response);
@@ -750,6 +1034,9 @@ async function handleGoogleTokenResponse(response) {
       state.pendingAuthRequest.reject(error);
     }
     state.pendingAuthRequest = null;
+    if (error.status === 401) {
+      clearStoredSession();
+    }
     setNotice(error.message || 'Google sign-in failed.', 'error');
   } finally {
     setLoading(false);
@@ -788,26 +1075,6 @@ function showSignedOutShell() {
   renderSessionBox();
 }
 
-async function bootstrapSignedInView() {
-  showSignedInShell();
-  await refreshSheetLists();
-  if (state.sheets.length) {
-    await selectSheet(state.sheets[0].title);
-  }
-}
-
-async function bootstrapSignedOutView() {
-  state.session = null;
-  state.sheetData = null;
-  state.sheets = [];
-  state.sheetName = '';
-  state.selectedRow = null;
-  state.mode = 'view';
-  showSignedOutShell();
-  setSignInState({ loading: false, enabled: false, label: 'Continue with Google' });
-  await prepareSignIn();
-}
-
 async function requestSignIn() {
   if (!state.authReady || !state.authClient) {
     setNotice('Google sign-in is still preparing. Please try again in a moment.', 'error');
@@ -826,16 +1093,10 @@ async function logoutUser() {
       // Logout should still succeed if revoke fails.
     }
   }
-  state.session = null;
-  state.sheetData = null;
-  state.sheets = [];
-  state.sheetName = '';
-  state.selectedRow = null;
-  state.mode = 'view';
-  state.search = '';
-  state.filterField = '';
-  state.filterValue = '';
+  clearStoredSession();
+  clearSessionExpiryTimer();
   await bootstrapSignedOutView();
+  await prepareSignIn();
   setNotice('You have been logged out.');
 }
 
@@ -871,7 +1132,9 @@ async function bootstrap() {
 
   elements.signInButton.addEventListener('click', requestSignIn);
   elements.refreshButton.addEventListener('click', async () => {
-    if (state.sheetName) await loadSheet(state.sheetName);
+    if (state.session) {
+      await refreshSheetLists(true);
+    }
   });
   elements.newButton.addEventListener('click', beginCreateRow);
   elements.saveButton.addEventListener('click', saveRow);
@@ -903,6 +1166,21 @@ async function bootstrap() {
 
   setSignInState({ loading: true, enabled: false, label: 'Preparing Google sign-in...' });
   showSignedOutShell();
+  renderWorkspaceState();
+
+  const authSetup = prepareSignIn();
+  const restoredSession = readStoredSession();
+  if (restoredSession) {
+    state.session = restoredSession;
+    setAuthorizedState();
+    scheduleSessionExpiryTimer();
+    showSignedInShell();
+    renderWorkspaceState();
+    setNotice('Restored your saved Google session.');
+    await bootstrapSignedInView({ autoLoad: false });
+  } else {
+    await bootstrapSignedOutView();
+  }
 
   const params = new URLSearchParams(window.location.search);
   if (params.get('error') === 'permission-denied') {
@@ -913,7 +1191,7 @@ async function bootstrap() {
     setNotice(getGoogleVerificationHelpMessage(), 'error');
   }
 
-  await prepareSignIn();
+  await authSetup;
 }
 
 bootstrap().catch((error) => setNotice(error.message, 'error'));
