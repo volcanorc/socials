@@ -53,6 +53,9 @@ Files and responsibilities
   - User-facing summary of the Apps Script transport and setup.
 - `guide.txt`
   - This internal handoff doc for the next AI.
+- `.github/workflows/pages.yml`
+  - GitHub Pages deployment workflow.
+  - Uploads the `public/` directory as the static site artifact on every push to `main`.
 - `server.js`
   - Legacy Node backend for the older Sheets-API path.
   - Still in the repo, but not required for the current static Apps Script flow.
@@ -63,6 +66,7 @@ What changed most recently
 - A `Clear errors` button was wired to clear inline cell-error state instead of accidentally adding a row.
 - Toolbar and table styles were updated for the native grid, including sticky row numbers and editable input states.
 - The browser runtime was verified to render the sheet data correctly from the Apps Script endpoint.
+- A GitHub Pages workflow was added, and the asset paths in `public/index.html` were switched to relative paths so the app works from a GitHub Pages project subpath.
 
 Why the previous approach changed
 - The earlier browser-only Google Sheets API path depended on direct spreadsheet permission checks and a lot of auth-state handling that did not match the current Apps Script deployment.
@@ -86,6 +90,11 @@ Future restricted-mode direction
   - route through a same-origin proxy
   - switch to a backend-backed Google API client
 - The current code already isolates the transport in `requestSpreadsheet()`, `loadMatrixFromSource()`, and `saveCellToSource()`.
+
+GitHub Pages deployment notes
+- GitHub Pages should be enabled to use GitHub Actions as the source.
+- Because this is a project page, the frontend uses relative asset paths instead of root-absolute `/styles.css` and `/app.js`.
+- Once Pages is active, the static site can be accessed from anywhere without needing the local Node server.
 
 Testing
 - `node --test`

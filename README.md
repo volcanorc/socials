@@ -41,6 +41,18 @@ The current script updates the active sheet of the spreadsheet attached to that 
 3. Deploy the files under `public/` to your static host.
 4. Make sure your Apps Script deployment is configured so the browser can call it successfully.
 
+## GitHub Pages deploy
+
+This repo now includes a GitHub Pages workflow at [.github/workflows/pages.yml](/C:/Users/Marketing/Documents/Codex/2026-06-03/pull-this-github-repo-and-start/.github/workflows/pages.yml).
+
+To make the site public on GitHub Pages:
+
+1. Push `main` to GitHub.
+2. In the repository settings, enable GitHub Pages and choose the GitHub Actions source if it is not already active.
+3. After the workflow finishes, open the Pages URL shown by GitHub.
+
+The app uses relative asset paths, so it works from the repository subpath that GitHub Pages serves.
+
 ## Session persistence
 
 - The browser stores the Google access token, expiry, and profile in `localStorage`.
