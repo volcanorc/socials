@@ -25,9 +25,9 @@ Local-first dashboard for a private Google Spreadsheet. The app authenticates wi
 powershell -ExecutionPolicy Bypass -File run-server.ps1
 ```
 
-If you prefer, you can also run `node server.js` from the repo root after the `.env` file is in place.
-
 For the simplest Windows workflow, double-click `start-local.cmd`.
+
+The launcher will try a cached portable Node runtime first, then a system-wide Node install, and if neither exists it will download a portable Node runtime into `.node-cache` the first time you run it.
 
 ## Google OAuth notes
 
@@ -37,6 +37,9 @@ For the simplest Windows workflow, double-click `start-local.cmd`.
 - The app requests `openid`, `email`, `profile`, and Google Sheets access.
 - The spreadsheet itself must remain private in Google Drive.
 - The server automatically reads local `.env` values at startup.
+- Local startup is self-contained, so you do not need `node` on PATH if the launcher can fetch its portable runtime once.
+- If Google shows `Access blocked` or `Error 403: access_denied` with a message about the app being tested, open the OAuth consent screen in Google Cloud Console and add the signed-in Google account to **Test users**.
+- While the app stays in Testing, only test users can sign in. To let any Google account use it, move the app to **Production** and complete Google verification.
 
 ## GitHub hosting note
 

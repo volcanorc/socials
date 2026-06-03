@@ -18,6 +18,11 @@ High-level flow
 9. If authorized, the dashboard loads sheet data and allows edits.
 10. Changes are written back to the original spreadsheet.
 
+Google Cloud Console note
+- If sign-in is blocked with `access_denied` and a message about the app being tested, the OAuth consent screen is still in Testing.
+- Add the Google account to the OAuth consent screen **Test users** list to allow sign-in during testing.
+- To allow non-test users later, switch the app to Production and submit it for Google verification.
+
 Runtime configuration
 - The server reads a local `.env` file automatically at startup.
 - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`, and `SPREADSHEET_ID` must be present in runtime env.

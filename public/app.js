@@ -98,6 +98,22 @@ function setSignInState({ loading = false, enabled = false, label = 'Continue wi
   }
 }
 
+function isGoogleVerificationBlock(response) {
+  const text = [response?.error, response?.error_description, response?.message]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+  return text.includes('access_denied')
+    || text.includes('verification process')
+    || text.includes('developer-approved testers')
+    || text.includes('app is currently being tested')
+    || text.includes('test users');
+}
+
+function getGoogleVerificationHelpMessage() {
+  return 'Google blocked this sign-in because the OAuth app is still in Testing or this Google account is not listed as a Test user. In Google Cloud Console, open APIs & Services > OAuth consent screen > Test users, add this account, then try again. If you want everyone to sign in, publish the app and submit it for verification.';
+}
+
 function renderSessionBox() {
   const box = elements.sessionBox;
   box.innerHTML = '';
@@ -533,6 +549,13 @@ async function prepareSignIn() {
 
 async function handleGoogleCodeResponse(response) {
   if (response.error) {
+    if (isGoogleVerificationBlock(response)) {
+      setNotice(getGoogleVerificationHelpMessage(), 'error');
+      if (elements.oauthState) {
+        elements.oauthState.textContent = 'Google blocked this sign-in. Add the account to Test users in Google Cloud Console.';
+      }
+      return;
+    }
     setNotice(response.error_description || response.error || 'Google sign-in was cancelled.', 'error');
     return;
   }
@@ -572,6 +595,13 @@ async function handleGoogleCodeResponse(response) {
 
 function handleGooglePopupError(error) {
   const type = error?.type || 'unknown';
+  if (type === 'access_denied') {
+    setNotice(getGoogleVerificationHelpMessage(), 'error');
+    if (elements.oauthState) {
+      elements.oauthState.textContent = 'Google blocked this sign-in. Add the account to Test users in Google Cloud Console.';
+    }
+    return;
+  }
   if (type === 'popup_closed') {
     setNotice('Google sign-in was closed before completion.');
     return;
@@ -700,6 +730,8 @@ async function bootstrap() {
     setNotice('The Google account you signed in with does not have access to the private spreadsheet.', 'error');
   } else if (params.get('error') === 'login-failed') {
     setNotice('Google sign-in failed. Please try again.', 'error');
+  } else if (params.get('error') === 'verification-blocked') {
+    setNotice(getGoogleVerificationHelpMessage(), 'error');
   }
 
   if (!session.authenticated) {
