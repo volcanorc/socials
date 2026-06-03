@@ -1,0 +1,125 @@
+Secure Google Spreadsheet Dashboard - Code Guide
+
+Purpose
+- This app is a private dashboard for a Google Spreadsheet.
+- It uses Google Identity Services popup login, then server-side Sheets access tied to the signed-in Google account.
+- The spreadsheet remains the source of truth in Google Drive.
+- The app does not permanently store spreadsheet contents.
+
+High-level flow
+1. User opens the site.
+2. The frontend requests auth config from the server.
+3. If Google OAuth values are present in the runtime environment, the page initializes the GIS popup code client.
+4. The user signs in through the Google popup.
+5. The popup returns an authorization code to the frontend.
+6. The frontend POSTs the code to the server.
+7. The server exchanges the code for tokens and loads the Google profile.
+8. The server checks whether that Google account can access the private spreadsheet.
+9. If authorized, the dashboard loads sheet data and allows edits.
+10. Changes are written back to the original spreadsheet.
+
+Runtime configuration
+- The server reads a local `.env` file automatically at startup.
+- `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`, and `SPREADSHEET_ID` must be present in runtime env.
+- `.env` is ignored by git and should not be committed.
+
+Root files
+- `server.js`
+  - Main Node HTTP server.
+  - Serves the frontend files from `public/`.
+  - Exposes auth and Sheets API endpoints.
+  - Reads local `.env` before building the runtime config.
+  - Owns session cookie handling, OAuth state checks, and Google code exchange.
+- `package.json`
+  - Minimal package manifest.
+  - Scripts:
+    - `start`: runs `node server.js`
+    - `test`: runs `node --test`
+- `README.md`
+  - User-facing setup and security notes.
+- `guide.txt`
+  - This developer-oriented map for the next AI.
+- `.env.example`
+  - Template for local runtime config.
+- `.gitignore`
+  - Ignores `node_modules`, `.env`, logs, and common junk.
+
+Folder: `lib/`
+- `lib/session.js`
+  - Cookie parsing and serialization.
+  - Encrypted session cookie creation and reading.
+  - OAuth state cookie helpers.
+  - Random state generation for auth protection.
+- `lib/google.js`
+  - Low-level Google API helpers.
+  - OAuth token exchange and refresh.
+  - User info fetch.
+  - Spreadsheet metadata and sheet value fetches.
+  - Sheet row append/update/delete helpers.
+  - Table parsing helpers for converting Sheets rows into app rows.
+- `lib/google-access.js`
+  - Higher-level permission gate.
+  - Ensures the session is valid, refreshes tokens if needed, and verifies spreadsheet access.
+  - Loads a worksheet for the dashboard.
+  - Adds, updates, and removes rows while keeping the spreadsheet as the source of truth.
+  - Performs the Google login completion step after the popup returns a code.
+
+Folder: `public/`
+- `public/index.html`
+  - Main page shell.
+  - Minimal auth card when signed out.
+  - Dashboard layout when signed in.
+  - Loads Google Identity Services script and the app JS module.
+- `public/app.js`
+  - Frontend state and all browser behavior.
+  - Requests `/api/auth/config` to initialize GIS popup login.
+  - Launches the Google popup and POSTs the returned auth code to `/auth/callback`.
+  - Renders session info, spreadsheet tabs, search/filter controls, row table, and row editor panel.
+  - Handles create/edit/delete actions through the server API.
+  - Switches between signed-out and signed-in views.
+- `public/styles.css`
+  - Full UI styling.
+  - Material-leaning visual style.
+  - Uses `Poppins` for display text and `Inter` for body text.
+  - Controls layout, cards, table styling, buttons, and responsive behavior.
+
+Folder: `test/`
+- `test/helpers.test.js`
+  - Lightweight unit tests for the helper layer.
+  - Verifies sheet column conversion, sheet parsing, cookie round-tripping, and random state generation.
+
+Server routes
+- `GET /`
+  - Serves the app shell.
+- `GET /api/auth/config`
+  - Returns GIS client config and sets the OAuth state cookie.
+- `POST /auth/callback`
+  - Receives the auth code from the popup flow.
+  - Exchanges it for Google tokens and creates the session cookie.
+- `GET /api/session`
+  - Returns current session/auth status.
+- `GET /api/spreadsheet`
+  - Returns spreadsheet title and worksheet list after permission validation.
+- `GET /api/sheet?sheet=...`
+  - Loads rows for one worksheet.
+- `POST /api/sheet?sheet=...`
+  - Appends a row.
+- `PUT /api/sheet?sheet=...&rowNumber=...`
+  - Updates a row.
+- `DELETE /api/sheet?sheet=...&rowNumber=...`
+  - Deletes a row.
+- `POST /auth/logout`
+  - Clears the session and OAuth state cookies.
+
+Important implementation notes
+- The browser never talks directly to Google Sheets.
+- The server owns the token exchange and access checks.
+- The app only shows data after Google confirms the signed-in account can access the spreadsheet.
+- The repo intentionally does not store the Google client secret.
+- The local `.env` is the runtime source for credentials during development.
+
+If you extend this app
+- Keep auth state in the server, not in the browser.
+- Keep spreadsheet access checks on every data-loading route.
+- Do not expose the spreadsheet or tokens to the client.
+- Update this guide if you add new folders, routes, or auth/storage behavior.
