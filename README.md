@@ -18,7 +18,7 @@ Browser-first dashboard that renders a live Google Sheet as a native editable gr
 3. On page load, the app sends a `GET` request to the Apps Script web app URL.
 4. The script returns a JSON matrix from the active sheet.
 5. The browser renders the matrix into an editable grid.
-6. Editing a cell sends a `POST` request with `{ row, col, val }`.
+6. Editing a cell sends a simple cross-origin `POST` request with `{ row, col, val }`.
 7. The Apps Script web app writes the change back to the spreadsheet.
 
 ## Apps Script contract

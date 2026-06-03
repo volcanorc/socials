@@ -207,13 +207,18 @@ async function requestSpreadsheet(method, body = null) {
     throw createApiError('Apps Script URL is missing from window.APP_CONFIG.', 500);
   }
 
-  const response = await fetch(APPS_SCRIPT_URL, {
+  const request = {
     method,
     mode: 'cors',
     cache: 'no-store',
-    headers: buildRequestHeaders(body ? { 'content-type': 'application/json' } : {}),
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  };
+
+  if (method === 'POST') {
+    request.headers = buildRequestHeaders({ 'content-type': 'text/plain;charset=UTF-8' });
+    request.body = body ? JSON.stringify(body) : '';
+  }
+
+  const response = await fetch(APPS_SCRIPT_URL, request);
 
   const payload = await readJson(response);
   if (!response.ok) {

@@ -33,8 +33,9 @@ Important transport details
   - `doGet(e)` that returns a JSON matrix
   - `doPost(e)` that accepts JSON in the shape `{ row, col, val }`
 - The current script in the repo assumes the active sheet in the deployed spreadsheet context.
-- `public/app.js` keeps a future-friendly auth header hook via `forwardAuthToken`, but it is off by default.
-- Do not enable the auth header unless you are also handling CORS and you actually need it for a future restricted-mode transport.
+- `public/app.js` sends save requests as a browser-simple `text/plain` POST with a raw JSON string body so the request does not trigger a cross-origin preflight.
+- `public/app.js` keeps a future-friendly auth header hook via `forwardAuthToken`, but it is off by default and is not used for the Apps Script route.
+- Do not enable the auth header on the Apps Script route unless you are also changing the cross-origin strategy.
 - If cross-origin fetches to `script.google.com` are blocked by the host, the frontend will need a same-origin proxy. The UI code is intentionally isolated so that transport can be swapped later without rewriting the grid renderer.
 
 Files and responsibilities
@@ -67,6 +68,7 @@ What changed most recently
 - Toolbar and table styles were updated for the native grid, including sticky row numbers and editable input states.
 - The browser runtime was verified to render the sheet data correctly from the Apps Script endpoint.
 - A GitHub Pages workflow was added, and the asset paths in `public/index.html` were switched to relative paths so the app works from a GitHub Pages project subpath.
+- The save transport was changed to a simple cross-origin POST (`text/plain` + JSON body) to avoid the browser preflight that caused “failed to fetch”.
 
 Why the previous approach changed
 - The earlier browser-only Google Sheets API path depended on direct spreadsheet permission checks and a lot of auth-state handling that did not match the current Apps Script deployment.
