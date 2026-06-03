@@ -50,11 +50,11 @@ const __dirname = path.dirname(__filename);
 const publicDir = path.join(__dirname, 'public');
 
 const env = {
-  PORT: Number(process.env.PORT || 3000),
+  PORT: Number(process.env.PORT || 3001),
   SESSION_SECRET: process.env.SESSION_SECRET || 'change-me-in-production',
   GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID || '',
   GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET || '',
-  GOOGLE_REDIRECT_URI: process.env.GOOGLE_REDIRECT_URI || `http://localhost:${Number(process.env.PORT || 3000)}`,
+  GOOGLE_REDIRECT_URI: process.env.GOOGLE_REDIRECT_URI || `http://127.0.0.1:${Number(process.env.PORT || 3001)}`,
   COOKIE_SECURE: String(process.env.COOKIE_SECURE || '').toLowerCase() === 'true',
   SPREADSHEET_ID: process.env.SPREADSHEET_ID || '1O2bRxJpxJRBVgv676W5oT0apVkHP_lWYYaDcG1axeCU',
 };

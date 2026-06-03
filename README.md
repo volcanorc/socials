@@ -22,17 +22,24 @@ Local-first dashboard for a private Google Spreadsheet. The app authenticates wi
 4. Start the app:
 
 ```bash
-node server.js
+powershell -ExecutionPolicy Bypass -File run-server.ps1
 ```
+
+If you prefer, you can also run `node server.js` from the repo root after the `.env` file is in place.
 
 ## Google OAuth notes
 
 - Create a Google OAuth client for a web application.
 - Add the origin from `GOOGLE_REDIRECT_URI` to the OAuth client configuration as an authorized JavaScript origin.
-- For popup mode, `GOOGLE_REDIRECT_URI` should be the app origin, for example `http://localhost:3000`.
+- For local popup mode, `GOOGLE_REDIRECT_URI` should match the app origin exactly, for example `http://127.0.0.1:3001`.
 - The app requests `openid`, `email`, `profile`, and Google Sheets access.
 - The spreadsheet itself must remain private in Google Drive.
 - The server automatically reads local `.env` values at startup.
+
+## GitHub hosting note
+
+- The repository can live on GitHub, but the Google OAuth code exchange still needs a running backend.
+- A static GitHub Pages site can host the UI, but it cannot safely replace the server-side OAuth callback and Sheets access layer.
 
 ## Security model
 
