@@ -36,14 +36,14 @@ The current script updates the active sheet of the spreadsheet attached to that 
 
 ## Setup
 
-1. Open [public/index.html](/C:/Users/Marketing/Documents/Codex/2026-06-03/pull-this-github-repo-and-start/public/index.html) and confirm `window.APP_CONFIG.appsScriptUrl` points to your deployed Apps Script web app.
+1. Open [public/index.html](/C:/Users/Marketing/Documents/Codex/2026-06-03/build-a-secure-personal-dashboard-website-2/public/index.html) and confirm `window.APP_CONFIG.appsScriptUrl` points to your deployed Apps Script web app.
 2. Keep `googleClientId` and `authScope` set for Google sign-in.
 3. Deploy the files under `public/` to your static host.
 4. Make sure your Apps Script deployment is configured so the browser can call it successfully.
 
 ## GitHub Pages deploy
 
-This repo now includes a GitHub Pages workflow at [.github/workflows/pages.yml](/C:/Users/Marketing/Documents/Codex/2026-06-03/pull-this-github-repo-and-start/.github/workflows/pages.yml).
+This repo now includes a GitHub Pages workflow at [.github/workflows/pages.yml](/C:/Users/Marketing/Documents/Codex/2026-06-03/build-a-secure-personal-dashboard-website-2/.github/workflows/pages.yml).
 
 To make the site public on GitHub Pages:
 
