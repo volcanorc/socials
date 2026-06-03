@@ -46,25 +46,19 @@
         </section>
 
         <section id="dashboard" class="dashboard hidden">
-          <header class="dashboard-bar">
-            <div class="dashboard-brand">
-              <div class="dashboard-label">Secure Dashboard</div>
-              <div class="dashboard-subtitle">Native browser grid backed by an Apps Script web app</div>
+          <section class="panel dashboard-top">
+            <div class="dashboard-top-copy">
+              <div class="panel-label">Cell status</div>
+              <div id="detailStatus" class="panel-meta">Click any cell to inspect its saved value and status.</div>
+              <form id="detailForm" class="detail-form"></form>
+              <div class="detail-actions">
+                <button id="saveButton" class="primary-button" type="button">Save all</button>
+                <button id="deleteButton" class="danger-button" type="button">Clear errors</button>
+                <button id="cancelButton" class="secondary-button" type="button">Reload</button>
+              </div>
             </div>
             <div id="sessionBox" class="session-box"></div>
-          </header>
-
-          <aside class="sidebar">
-            <div class="panel">
-              <div class="panel-label">Connection</div>
-              <div id="spreadsheetTitle" class="panel-title">Loading...</div>
-              <div id="sheetMeta" class="panel-meta"></div>
-            </div>
-            <div class="panel">
-              <div class="panel-label">Source</div>
-              <div id="sheetTabs" class="sheet-tabs"></div>
-            </div>
-          </aside>
+          </section>
 
           <section class="workspace">
             <div class="toolbar">
@@ -73,7 +67,6 @@
                 <input id="searchInput" type="search" placeholder="Search cells..." />
               </div>
               <div class="toolbar-actions">
-                <button id="refreshButton" class="secondary-button" type="button">Refresh</button>
                 <button id="newButton" class="primary-button" type="button">Add row</button>
               </div>
             </div>
@@ -94,19 +87,6 @@
               </div>
             </div>
           </section>
-
-          <aside class="detail-panel">
-            <div class="panel">
-              <div class="panel-label">Cell status</div>
-              <div id="detailStatus" class="panel-meta">Click any cell to inspect its saved value and status.</div>
-              <form id="detailForm" class="detail-form"></form>
-              <div class="detail-actions">
-                <button id="saveButton" class="primary-button" type="button">Save all</button>
-                <button id="deleteButton" class="danger-button" type="button">Clear errors</button>
-                <button id="cancelButton" class="secondary-button" type="button">Reload</button>
-              </div>
-            </div>
-          </aside>
         </section>
       </main>
     </div>

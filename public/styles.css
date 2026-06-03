@@ -166,39 +166,26 @@ h2 {
 
 .dashboard {
   display: grid;
-  grid-template-columns: minmax(16rem, 18rem) minmax(0, 1fr) minmax(18rem, 20rem);
   gap: 1rem;
   align-items: start;
 }
 
-.dashboard-bar {
-  grid-column: 1 / -1;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 1rem;
-  margin-bottom: 0;
-  padding: 1rem 1.1rem;
-  border-radius: var(--radius);
-}
-
-.dashboard-brand {
-  display: grid;
-  gap: 0.2rem;
-}
-
-.dashboard-label {
-  font-family: var(--font-display);
-  font-size: 1rem;
-  font-weight: 700;
-}
-
-.sidebar,
-.workspace,
-.detail-panel {
+.dashboard-top,
+.workspace {
   display: grid;
   gap: 1rem;
   align-content: start;
+  min-width: 0;
+}
+
+.dashboard-top {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.dashboard-top-copy {
+  display: grid;
+  gap: 0.85rem;
   min-width: 0;
 }
 
@@ -222,37 +209,6 @@ h2 {
 .panel-title {
   font-size: 1.15rem;
   font-weight: 700;
-}
-
-.sheet-tabs {
-  display: grid;
-  gap: 0.55rem;
-}
-
-.sheet-tab {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  width: 100%;
-  padding: 0.8rem 0.95rem;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid transparent;
-  color: var(--text);
-  text-align: left;
-  box-shadow: none;
-}
-
-.sheet-tab:hover {
-  background: rgba(255, 255, 255, 0.08);
-}
-
-.sheet-tab.active {
-  background: rgba(120, 200, 255, 0.16);
-  border-color: rgba(120, 200, 255, 0.26);
-}
-
-.workspace {
-  min-width: 0;
 }
 
 .toolbar {
@@ -314,10 +270,6 @@ textarea:focus {
 .danger-button {
   background: rgba(255, 125, 125, 0.18);
   color: #ffd3d3;
-}
-
-.oauth-state {
-  font-size: 0.92rem;
 }
 
 .table-card {
@@ -457,12 +409,6 @@ tbody tr:hover {
   background: rgba(109, 211, 255, 0.05);
 }
 
-.row-actions {
-  display: flex;
-  gap: 0.45rem;
-  flex-wrap: wrap;
-}
-
 .inline-button {
   padding: 0.55rem 0.8rem;
   border-radius: 999px;
@@ -522,6 +468,11 @@ tbody tr:hover {
     text-align: left;
   }
 
+  .dashboard-top {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+
   .toolbar {
     grid-template-columns: 1fr;
   }
@@ -535,11 +486,6 @@ tbody tr:hover {
 @media (max-width: 720px) {
   .page-shell {
     padding: 1rem;
-  }
-
-  .dashboard-bar {
-    flex-direction: column;
-    align-items: flex-start;
   }
 
   .session-box {
